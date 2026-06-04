@@ -1,0 +1,17 @@
+services:
+  logark-server:
+    build: .
+    container_name: logark-server
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LOGARK_ADDR: 0.0.0.0:7700
+    ports:
+      - "7700:7700"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7700/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

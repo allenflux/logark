@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LogArk Audit Console</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body class="bg-body-tertiary app-body">
+  <div class="container-fluid py-4 py-lg-5">
+    <div class="mx-auto" style="max-width: 1480px;">
+      <header class="mb-4">
+        <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-end gap-3">
+          <div>
+            <p class="text-uppercase small fw-semibold text-primary mb-2">Audit analytics</p>
+            <h1 class="display-5 fw-semibold text-body-emphasis mb-2">LogArk 审计分析台</h1>
+            <p class="text-secondary mb-0">集中查看接口流量、耗时、错误与单条请求详情。默认短时间窗口、聚合优先，尽量减轻数据库压力。</p>
+          </div>
+          <div class="d-flex gap-2 flex-wrap">
+            <span class="badge text-bg-light border text-secondary px-3 py-2">MySQL audit log</span>
+            <span id="windowBadge" class="badge text-bg-primary px-3 py-2">最近 24 小时</span>
+          </div>
+        </div>
+      </header>
+
+      <div class="card shadow-sm border-0 mb-4">
+        <div class="card-body p-4">
+          <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-2 mb-3">
+            <div>
+              <h2 class="h3 mb-1 text-body-emphasis">筛选条件</h2>
+              <p class="text-secondary mb-0">先筛选范围，再看分析结果和请求详情</p>
+            </div>
+          </div>
+
+          <div class="row g-3 align-items-end">
+            <div class="col-12 col-md-6 col-xl-2">
+              <label class="form-label text-secondary">时间窗口</label>
+              <select id="hours" class="form-select form-select-lg rounded-0">
+                <option value="1">最近 1 小时</option>
+                <option value="6">最近 6 小时</option>
+                <option value="24" selected>最近 24 小时</option>
+                <option value="72">最近 72 小时</option>
+                <option value="168">最近 7 天</option>
+              </select>
+            </div>
+            <div class="col-12 col-md-6 col-xl-3">
+              <label class="form-label text-secondary">Path 前缀</label>
+              <input id="path" class="form-control form-control-lg rounded-0" placeholder="/api/public/generate">
+            </div>
+            <div class="col-12 col-md-6 col-xl-2">
+              <label class="form-label text-secondary">Method</label>
+              <input id="method" class="form-control form-control-lg rounded-0" placeholder="POST">
+            </div>
+            <div class="col-12 col-md-6 col-xl-3">
+              <label class="form-label text-secondary">API Key</label>
+              <input id="apiKey" class="form-control form-control-lg rounded-0" placeholder="精确过滤">
+            </div>
+            <div class="col-12 col-xl-2 d-grid">
+                <button id="refreshButton" class="btn btn-primary btn-lg rounded-0">更新分析</button>
+            </div>
+          </div>
+
+          <hr class="my-4">
+
+          <div class="row g-3 align-items-end">
+            <div class="col-12 col-md-6 col-xl-3">
+              <label class="form-label text-secondary">request_id</label>
+              <input id="requestId" class="form-control rounded-0" placeholder="request_id">
+            </div>
+            <div class="col-12 col-md-6 col-xl-3">
+              <label class="form-label text-secondary">uuid</label>
+              <input id="listUuid" class="form-control rounded-0" placeholder="uuid">
+            </div>
+            <div class="col-12 col-md-6 col-xl-2">
+              <label class="form-label text-secondary">task_id</label>
+              <input id="taskId" class="form-control rounded-0" placeholder="task_id">
+            </div>
+            <div class="col-12 col-md-6 col-xl-2">
+              <label class="form-label text-secondary">status_code</label>
+              <input id="statusCode" class="form-control rounded-0" placeholder="status_code">
+            </div>
+            <div class="col-12 col-xl-2 d-grid">
+              <button id="searchButton" class="btn btn-outline-primary rounded-0">查询列表</button>
+            </div>
+          </div>
+
+          <div class="row g-3 align-items-end mt-1">
+            <div class="col-12 col-md-6 col-xl-2">
+              <label class="form-label text-secondary">按 ID 查询</label>
+              <input id="detailId" class="form-control rounded-0" placeholder="ID">
+            </div>
+            <div class="col-12 col-md-6 col-xl-1 d-grid">
+              <button id="detailByIdButton" class="btn btn-outline-secondary rounded-0">查 ID</button>
+            </div>
+            <div class="col-12 col-md-6 col-xl-3">
+              <label class="form-label text-secondary">按 request_id 查询</label>
+              <input id="detailRequestId" class="form-control rounded-0" placeholder="request_id">
+            </div>
+            <div class="col-12 col-md-6 col-xl-2 d-grid">
+              <button id="detailByRequestButton" class="btn btn-outline-secondary rounded-0">查 request_id</button>
+            </div>
+            <div class="col-12 col-md-8 col-xl-3">
+              <label class="form-label text-secondary">按 uuid 查询</label>
+              <input id="detailUuid" class="form-control rounded-0" placeholder="例如 5b74f3a6-b4f2-411b-83ff-f7a75283b6c6">
+            </div>
+            <div class="col-12 col-md-4 col-xl-1 d-grid">
+              <button id="detailByUuidButton" class="btn btn-outline-secondary rounded-0">查 uuid</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row g-4">
+        <div class="col-12 col-xxl-8">
+          <div class="card shadow-sm border-0 mb-4">
+            <div class="card-body p-4">
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <h2 class="h3 text-body-emphasis mb-0">关键指标</h2>
+                <span class="text-secondary">请求规模、稳定性与耗时表现</span>
+              </div>
+              <div id="metricCards" class="row g-3"></div>
+            </div>
+          </div>
+
+          <div class="card shadow-sm border-0 mb-4">
+            <div class="card-body p-4">
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <h2 class="h3 text-body-emphasis mb-0">流量与耗时趋势</h2>
+                <span class="text-secondary">吞吐、错误和平均耗时</span>
+              </div>
+              <div id="trendChart" class="chart-host"></div>
+            </div>
+          </div>
+
+          <div class="row g-4">
+            <div class="col-12 col-lg-6">
+              <div class="card shadow-sm border-0 h-100">
+                <div class="card-body">
+                  <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h3 class="h5 text-body-emphasis mb-0">高频接口路径</h3>
+                    <span class="text-secondary small">前 8 项</span>
+                  </div>
+                  <div id="topPaths" class="bar-list"></div>
+                </div>
+              </div>
+            </div>
+            <div class="col-12 col-lg-6">
+              <div class="card shadow-sm border-0 h-100">
+                <div class="card-body">
+                  <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h3 class="h5 text-body-emphasis mb-0">状态码构成</h3>
+                    <span class="text-secondary small">前 8 项</span>
+                  </div>
+                  <div id="statusDist" class="bar-list"></div>
+                </div>
+              </div>
+            </div>
+            <div class="col-12 col-lg-6">
+              <div class="card shadow-sm border-0 h-100">
+                <div class="card-body">
+                  <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h3 class="h5 text-body-emphasis mb-0">活跃 API Key</h3>
+                    <span class="text-secondary small">原始值</span>
+                  </div>
+                  <div id="topKeys" class="bar-list"></div>
+                </div>
+              </div>
+            </div>
+            <div class="col-12 col-lg-6">
+              <div class="card shadow-sm border-0 h-100">
+                <div class="card-body">
+                  <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h3 class="h5 text-body-emphasis mb-0">高频任务类型</h3>
+                    <span class="text-secondary small">前 8 项</span>
+                  </div>
+                  <div id="topTasks" class="bar-list"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-12 col-xxl-4">
+          <div class="card shadow-sm border-0 mb-4">
+            <div class="card-body p-4">
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <h2 class="h3 text-body-emphasis mb-0">Recent Records</h2>
+                <span class="text-secondary">游标翻页</span>
+              </div>
+              <div class="table-responsive border">
+                <table class="table table-hover align-middle mb-0">
+                  <thead class="table-light">
+                    <tr>
+                      <th>ID</th>
+                      <th>时间</th>
+                      <th>接口</th>
+                      <th>状态</th>
+                      <th>耗时</th>
+                      <th>request_id</th>
+                      <th>task_id</th>
+                    </tr>
+                  </thead>
+                  <tbody id="recordsTable"></tbody>
+                </table>
+              </div>
+              <div class="d-flex justify-content-end mt-3">
+                <button id="loadMoreButton" class="btn btn-outline-secondary rounded-0">加载更多</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card shadow-sm border-0">
+            <div class="card-body p-4">
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <h2 class="h3 text-body-emphasis mb-0">Request Detail</h2>
+                <span class="text-secondary">头、体和任务信息</span>
+              </div>
+              <div id="detailMeta" class="row g-2 mb-3"></div>
+              <div class="row g-3">
+                <div class="col-12 col-md-6">
+                  <div class="border p-3 h-100">
+                    <h3 class="h6 text-body-emphasis mb-3">请求头</h3>
+                    <pre id="requestHeaders" class="app-pre mb-0"></pre>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="border p-3 h-100">
+                    <h3 class="h6 text-body-emphasis mb-3">响应头</h3>
+                    <pre id="responseHeaders" class="app-pre mb-0"></pre>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="border p-3 h-100">
+                    <h3 class="h6 text-body-emphasis mb-3">请求体</h3>
+                    <pre id="requestBody" class="app-pre mb-0"></pre>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="border p-3 h-100">
+                    <h3 class="h6 text-body-emphasis mb-3">响应体</h3>
+                    <pre id="responseBody" class="app-pre mb-0"></pre>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous"></script>
+  <script src="/assets/app.js"></script>
+</body>
+</html>
