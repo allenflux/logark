@@ -1,5 +1,6 @@
 FROM rust:1.82-slim AS builder
 WORKDIR /app
+ENV CARGO_BUILD_JOBS=1
 COPY . .
 RUN apt-get update && apt-get install -y pkg-config libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN cargo build --release --bin logark-server
