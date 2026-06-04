@@ -1,4 +1,4 @@
-FROM rust:1.85-slim AS builder
+FROM rust:1.95-slim AS builder
 WORKDIR /app
 ENV CARGO_BUILD_JOBS=1
 COPY . .
