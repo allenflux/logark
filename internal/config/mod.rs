@@ -11,6 +11,13 @@ pub struct Config {
     pub max_window_hours: u32,
     pub max_list_limit: u32,
     pub slow_request_ms: i32,
+    pub tg_bot_token: Option<String>,
+    pub tg_chat_id: Option<String>,
+    pub tg_poll_interval_secs: u64,
+    pub tg_report_hour: u32,
+    pub tg_report_minute: u32,
+    pub tg_timezone_offset_hours: i32,
+    pub tg_default_report_limit: u32,
 }
 
 impl Config {
@@ -25,8 +32,26 @@ impl Config {
             max_window_hours: env_u32("LOGARK_MAX_WINDOW_HOURS", 168),
             max_list_limit: env_u32("LOGARK_MAX_LIST_LIMIT", 100),
             slow_request_ms: env_i32("LOGARK_SLOW_REQUEST_MS", 1000),
+            tg_bot_token: env_opt("TG_BOT_TOKEN"),
+            tg_chat_id: env_opt("TG_CHAT_ID"),
+            tg_poll_interval_secs: env_u64("TG_POLL_INTERVAL_SECS", 10),
+            tg_report_hour: env_u32("TG_REPORT_HOUR", 9),
+            tg_report_minute: env_u32("TG_REPORT_MINUTE", 0),
+            tg_timezone_offset_hours: env_i32("TG_TIMEZONE_OFFSET_HOURS", 8),
+            tg_default_report_limit: env_u32("TG_DEFAULT_REPORT_LIMIT", 20),
         })
     }
+}
+
+fn env_opt(key: &str) -> Option<String> {
+    env::var(key).ok().and_then(|v| {
+        let trimmed = v.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }
 
 fn env_u32(key: &str, default: u32) -> u32 {

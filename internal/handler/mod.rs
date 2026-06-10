@@ -21,10 +21,18 @@ pub async fn index() -> Html<&'static str> {
 }
 
 pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    let (total_records, latest_request_ts) = state
+        .audit_service
+        .health_snapshot()
+        .await
+        .unwrap_or((0, None));
+
     Json(HealthResponse {
         status: "ok".into(),
         name: "logark".into(),
         cache_entries: state.audit_service.cache_entry_count().await,
+        total_records,
+        latest_request_ts,
     })
 }
 

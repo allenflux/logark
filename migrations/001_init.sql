@@ -38,3 +38,10 @@ CREATE TABLE IF NOT EXISTS api_audit_log (
     KEY idx_bid (bid),
     KEY idx_request_id (request_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS tg_bid_watch (
+    bid VARCHAR(128) NOT NULL,
+    note VARCHAR(255) NULL,
+    created_ts BIGINT NOT NULL,
+    PRIMARY KEY (bid)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

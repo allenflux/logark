@@ -10,8 +10,9 @@ use tokio::sync::RwLock;
 use crate::{
     config::Config,
     model::{
-        AuditRecordDetail, AuditRecordSummary, DashboardQuery, DashboardResponse, DashboardSummary,
-        DashboardWindow, MetricSlice, RecordListQuery, RecordListResponse, TimelinePoint,
+        AuditRecordDetail, AuditRecordSummary, BidReport, BidReportWindow, BidStatusCodeStat,
+        BidWatchItem, DashboardQuery, DashboardResponse, DashboardSummary, DashboardWindow,
+        MetricSlice, RecordListQuery, RecordListResponse, TimelinePoint,
     },
 };
 
@@ -248,6 +249,122 @@ impl AuditAnalyticsService {
 
     pub async fn cache_entry_count(&self) -> usize {
         self.dashboard_cache.read().await.len()
+    }
+
+    pub async fn health_snapshot(&self) -> anyhow::Result<(i64, Option<i64>)> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                CAST(COUNT(*) AS SIGNED) AS total_records,
+                CAST(MAX(request_ts) AS SIGNED) AS latest_request_ts
+            FROM api_audit_log
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        let total_records = row.try_get::<i64, _>("total_records")?;
+        let latest_request_ts = row.try_get::<Option<i64>, _>("latest_request_ts")?;
+        Ok((total_records, latest_request_ts))
+    }
+
+    pub async fn report_status_400_bids(
+        &self,
+        from_ts: i64,
+        to_ts: i64,
+        limit: u32,
+    ) -> anyhow::Result<BidReport> {
+        let ranking = self
+            .fetch_bid_status_code_stats(from_ts, to_ts, Some(limit), None)
+            .await?;
+        let watched_bids = self.list_watched_bids().await?;
+        let watched = if watched_bids.is_empty() {
+            Vec::new()
+        } else {
+            let bids = watched_bids
+                .into_iter()
+                .map(|item| item.bid)
+                .collect::<Vec<_>>();
+            self.fetch_bid_status_code_stats(from_ts, to_ts, None, Some(bids))
+                .await?
+        };
+
+        Ok(BidReport {
+            window: BidReportWindow {
+                from_ts,
+                to_ts,
+                label: format!("{from_ts}-{to_ts}"),
+            },
+            ranking,
+            watched,
+        })
+    }
+
+    pub async fn get_bid_status_400_stats(
+        &self,
+        bid: &str,
+        from_ts: i64,
+        to_ts: i64,
+    ) -> anyhow::Result<Option<BidStatusCodeStat>> {
+        let bid = bid.trim();
+        if bid.is_empty() {
+            return Ok(None);
+        }
+
+        let mut stats = self
+            .fetch_bid_status_code_stats(from_ts, to_ts, Some(1), Some(vec![bid.to_string()]))
+            .await?;
+        Ok(stats.pop())
+    }
+
+    pub async fn add_watched_bid(&self, bid: &str, note: Option<&str>) -> anyhow::Result<()> {
+        let bid = bid.trim();
+        anyhow::ensure!(!bid.is_empty(), "bid cannot be empty");
+
+        sqlx::query(
+            r#"
+            INSERT INTO tg_bid_watch (bid, note, created_ts)
+            VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE note = VALUES(note)
+            "#,
+        )
+        .bind(bid)
+        .bind(note.map(str::trim).filter(|value| !value.is_empty()))
+        .bind(chrono::Utc::now().timestamp_millis())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn remove_watched_bid(&self, bid: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query("DELETE FROM tg_bid_watch WHERE bid = ?")
+            .bind(bid.trim())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn list_watched_bids(&self) -> anyhow::Result<Vec<BidWatchItem>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT bid, note, created_ts
+            FROM tg_bid_watch
+            ORDER BY created_ts ASC, bid ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(BidWatchItem {
+                    bid: row.try_get("bid")?,
+                    note: row.try_get("note")?,
+                    created_ts: row.try_get("created_ts")?,
+                })
+            })
+            .collect()
     }
 
     fn resolve_window(&self, hours: Option<u32>) -> AnalyticsWindow {
@@ -536,6 +653,48 @@ impl AuditAnalyticsService {
                 })
             })
             .collect()
+    }
+
+    async fn fetch_bid_status_code_stats(
+        &self,
+        from_ts: i64,
+        to_ts: i64,
+        limit: Option<u32>,
+        bids: Option<Vec<String>>,
+    ) -> anyhow::Result<Vec<BidStatusCodeStat>> {
+        let mut qb: QueryBuilder<MySql> = QueryBuilder::new(
+            "SELECT bid, \
+             CAST(COUNT(*) AS SIGNED) AS total_calls, \
+             CAST(COALESCE(SUM(CASE WHEN status_code = 400 THEN 1 ELSE 0 END), 0) AS SIGNED) AS status_400_calls, \
+             CAST(COUNT(DISTINCT NULLIF(task_id, '')) AS SIGNED) AS distinct_task_ids, \
+             CAST(COUNT(DISTINCT NULLIF(api_key, '')) AS SIGNED) AS distinct_api_keys, \
+             CAST(COALESCE(MAX(request_ts), 0) AS SIGNED) AS last_request_ts \
+             FROM api_audit_log WHERE request_ts BETWEEN ",
+        );
+        qb.push_bind(from_ts)
+            .push(" AND ")
+            .push_bind(to_ts)
+            .push(" AND bid IS NOT NULL AND bid != ''");
+
+        if let Some(bids) = bids.filter(|items| !items.is_empty()) {
+            qb.push(" AND bid IN (");
+            let mut separated = qb.separated(", ");
+            for bid in bids {
+                separated.push_bind(bid);
+            }
+            separated.push_unseparated(")");
+        }
+
+        qb.push(" GROUP BY bid HAVING status_400_calls > 0 ORDER BY status_400_calls DESC, total_calls DESC, bid ASC");
+
+        if let Some(limit) = limit {
+            qb.push(" LIMIT ").push_bind(i64::from(limit));
+        }
+
+        qb.build_query_as::<BidStatusCodeStat>()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(Into::into)
     }
 }
 

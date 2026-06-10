@@ -80,6 +80,8 @@ pub struct HealthResponse {
     pub status: String,
     pub name: String,
     pub cache_entries: usize,
+    pub total_records: i64,
+    pub latest_request_ts: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,4 +136,35 @@ pub struct RecordListResponse {
     pub items: Vec<AuditRecordSummary>,
     pub next_cursor_ts: Option<i64>,
     pub next_cursor_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct BidStatusCodeStat {
+    pub bid: String,
+    pub total_calls: i64,
+    pub status_400_calls: i64,
+    pub distinct_task_ids: i64,
+    pub distinct_api_keys: i64,
+    pub last_request_ts: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BidWatchItem {
+    pub bid: String,
+    pub note: Option<String>,
+    pub created_ts: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BidReportWindow {
+    pub from_ts: i64,
+    pub to_ts: i64,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BidReport {
+    pub window: BidReportWindow,
+    pub ranking: Vec<BidStatusCodeStat>,
+    pub watched: Vec<BidStatusCodeStat>,
 }
