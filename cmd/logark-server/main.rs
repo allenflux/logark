@@ -6,6 +6,7 @@ use logark::{
     config::Config,
     db,
     handler::{self, AppState},
+    retention::{spawn_audit_retention_task, AuditRetentionPolicy},
     service::AuditAnalyticsService,
 };
 
@@ -21,9 +22,10 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::from_env()?;
     let pool = db::connect(&cfg.database_url, cfg.db_max_connections).await?;
     db::migrate(&pool).await?;
+    let retention_policy = AuditRetentionPolicy::from_config(&cfg);
 
     let state = AppState {
-        audit_service: AuditAnalyticsService::new(pool, cfg.clone()),
+        audit_service: AuditAnalyticsService::new(pool.clone(), cfg.clone()),
     };
 
     let app = Router::new()
@@ -43,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&cfg.addr).await?;
+    let _audit_retention_task = spawn_audit_retention_task(pool, retention_policy);
     tracing::info!(addr = %cfg.addr, "LogArk server started");
     axum::serve(listener, app).await?;
     Ok(())

@@ -3,244 +3,365 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LogArk Audit Console</title>
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#b42318">
+  <meta name="description" content="LogArk 非 200 拦截请求解释性分析报告" data-i18n-content="meta.description">
+  <title>LogArk · 非 200 拦截请求分析报告</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.min.css" rel="stylesheet">
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
-<body class="bg-body-tertiary app-body">
-  <div class="container-fluid py-4 py-lg-5">
-    <div class="mx-auto" style="max-width: 1480px;">
-      <header class="mb-4">
-        <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-end gap-3">
+<body class="app-body">
+  <nav class="navbar navbar-expand-lg bg-white border-bottom">
+    <div class="container-fluid app-shell py-2">
+      <a class="navbar-brand d-flex align-items-center gap-2" href="/" aria-label="LogArk 首页" data-i18n-aria-label="nav.homeAria">
+        <img class="brand-mark" src="/assets/favicon.svg" width="32" height="32" alt="">
+        <span class="fw-semibold">LogArk</span>
+      </a>
+      <div class="d-flex align-items-center gap-2 ms-auto">
+        <span class="badge rounded-pill bg-body-secondary text-body d-none d-md-inline-flex" data-i18n="nav.audit">非 200 拦截报告</span>
+        <span id="lastUpdated" class="navbar-text text-body-secondary small text-nowrap d-none d-sm-inline" aria-live="polite" data-i18n="status.awaitingRefresh">等待刷新</span>
+        <label class="visually-hidden" for="localeSelect">语言 / Language</label>
+        <select id="localeSelect" class="form-select form-select-sm locale-select" aria-label="语言 / Language">
+          <option value="zh-CN">中文</option>
+          <option value="en">English</option>
+        </select>
+      </div>
+    </div>
+  </nav>
+
+  <main class="container-fluid app-shell py-4">
+    <div class="d-flex flex-column flex-lg-row align-items-lg-end justify-content-between gap-3 mb-4">
+      <div>
+        <h1 class="paper-title h2 fw-semibold text-body-emphasis mb-2" data-i18n="page.title">非 200 拦截请求分析报告</h1>
+        <p class="text-body-secondary mb-0" data-i18n="page.subtitle">以非 200 请求为主体，从状态码、接口、Method 与时间趋势解释拦截数据；全部请求仅用于计算错误率。</p>
+      </div>
+      <div class="d-flex align-items-center gap-2 flex-wrap">
+        <span id="windowBadge" class="badge rounded-pill bg-white text-body-secondary border">最近 24 小时</span>
+        <span class="definition-pill d-inline-flex align-items-center gap-2">
+          <span class="definition-dot" aria-hidden="true"></span>
+          <code>status_code != 200</code>
+        </span>
+      </div>
+    </div>
+
+    <div id="pageAlert" class="alert alert-danger alert-dismissible fade show d-none" role="alert">
+      <strong data-i18n="feedback.loadFailedPrefix">加载失败：</strong><span id="pageAlertMessage"></span>
+      <button type="button" class="btn-close" aria-label="关闭" data-i18n-aria-label="common.close" data-alert-close></button>
+    </div>
+
+    <section class="card mb-4" aria-labelledby="filterTitle">
+      <div class="card-header bg-white border-0 px-4 pt-4 pb-0">
+        <div class="d-flex flex-column flex-md-row justify-content-between gap-2">
           <div>
-            <p class="text-uppercase small fw-semibold text-primary mb-2">Audit analytics</p>
-            <h1 class="display-5 fw-semibold text-body-emphasis mb-2">LogArk 审计分析台</h1>
-            <p class="text-secondary mb-0">集中查看接口流量、耗时、错误与单条请求详情。默认短时间窗口、聚合优先，尽量减轻数据库压力。</p>
+            <h2 id="filterTitle" class="paper-heading h5 mb-1" data-i18n="filters.title">分析范围</h2>
+            <p class="small text-body-secondary mb-0" data-i18n="filters.help">筛选条件同时作用于错误率、趋势和排行榜</p>
           </div>
-          <div class="d-flex gap-2 flex-wrap">
-            <span class="badge text-bg-light border text-secondary px-3 py-2">MySQL audit log</span>
-            <span id="windowBadge" class="badge text-bg-primary px-3 py-2">最近 24 小时</span>
-          </div>
-        </div>
-      </header>
-
-      <div class="card shadow-sm border-0 mb-4">
-        <div class="card-body p-4">
-          <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-2 mb-3">
-            <div>
-              <h2 class="h3 mb-1 text-body-emphasis">筛选条件</h2>
-              <p class="text-secondary mb-0">先筛选范围，再看分析结果和请求详情</p>
-            </div>
-          </div>
-
-          <div class="row g-3 align-items-end">
-            <div class="col-12 col-md-6 col-xl-2">
-              <label class="form-label text-secondary">时间窗口</label>
-              <select id="hours" class="form-select form-select-lg rounded-0">
-                <option value="1">最近 1 小时</option>
-                <option value="6">最近 6 小时</option>
-                <option value="24" selected>最近 24 小时</option>
-                <option value="72">最近 72 小时</option>
-                <option value="168">最近 7 天</option>
-              </select>
-            </div>
-            <div class="col-12 col-md-6 col-xl-3">
-              <label class="form-label text-secondary">Path 前缀</label>
-              <input id="path" class="form-control form-control-lg rounded-0" placeholder="/api/public/generate">
-            </div>
-            <div class="col-12 col-md-6 col-xl-2">
-              <label class="form-label text-secondary">Method</label>
-              <input id="method" class="form-control form-control-lg rounded-0" placeholder="POST">
-            </div>
-            <div class="col-12 col-md-6 col-xl-3">
-              <label class="form-label text-secondary">API Key</label>
-              <input id="apiKey" class="form-control form-control-lg rounded-0" placeholder="精确过滤">
-            </div>
-            <div class="col-12 col-xl-2 d-grid">
-                <button id="refreshButton" class="btn btn-primary btn-lg rounded-0">更新分析</button>
-            </div>
-          </div>
-
-          <hr class="my-4">
-
-          <div class="row g-3 align-items-end">
-            <div class="col-12 col-md-6 col-xl-3">
-              <label class="form-label text-secondary">request_id</label>
-              <input id="requestId" class="form-control rounded-0" placeholder="request_id">
-            </div>
-            <div class="col-12 col-md-6 col-xl-3">
-              <label class="form-label text-secondary">uuid</label>
-              <input id="listUuid" class="form-control rounded-0" placeholder="uuid">
-            </div>
-            <div class="col-12 col-md-6 col-xl-2">
-              <label class="form-label text-secondary">task_id</label>
-              <input id="taskId" class="form-control rounded-0" placeholder="task_id">
-            </div>
-            <div class="col-12 col-md-6 col-xl-2">
-              <label class="form-label text-secondary">status_code</label>
-              <input id="statusCode" class="form-control rounded-0" placeholder="status_code">
-            </div>
-            <div class="col-12 col-xl-2 d-grid">
-              <button id="searchButton" class="btn btn-outline-primary rounded-0">查询列表</button>
-            </div>
-          </div>
-
-          <div class="row g-3 align-items-end mt-1">
-            <div class="col-12 col-md-6 col-xl-2">
-              <label class="form-label text-secondary">按 ID 查询</label>
-              <input id="detailId" class="form-control rounded-0" placeholder="ID">
-            </div>
-            <div class="col-12 col-md-6 col-xl-1 d-grid">
-              <button id="detailByIdButton" class="btn btn-outline-secondary rounded-0">查 ID</button>
-            </div>
-            <div class="col-12 col-md-6 col-xl-3">
-              <label class="form-label text-secondary">按 request_id 查询</label>
-              <input id="detailRequestId" class="form-control rounded-0" placeholder="request_id">
-            </div>
-            <div class="col-12 col-md-6 col-xl-2 d-grid">
-              <button id="detailByRequestButton" class="btn btn-outline-secondary rounded-0">查 request_id</button>
-            </div>
-            <div class="col-12 col-md-8 col-xl-3">
-              <label class="form-label text-secondary">按 uuid 查询</label>
-              <input id="detailUuid" class="form-control rounded-0" placeholder="例如 5b74f3a6-b4f2-411b-83ff-f7a75283b6c6">
-            </div>
-            <div class="col-12 col-md-4 col-xl-1 d-grid">
-              <button id="detailByUuidButton" class="btn btn-outline-secondary rounded-0">查 uuid</button>
-            </div>
-          </div>
+          <button id="resetDashboardButton" type="button" class="btn btn-sm btn-link text-decoration-none align-self-start" data-i18n="actions.resetFilters">重置筛选</button>
         </div>
       </div>
-
-      <div class="row g-4">
-        <div class="col-12 col-xxl-8">
-          <div class="card shadow-sm border-0 mb-4">
-            <div class="card-body p-4">
-              <div class="d-flex justify-content-between align-items-center mb-3">
-                <h2 class="h3 text-body-emphasis mb-0">关键指标</h2>
-                <span class="text-secondary">请求规模、稳定性与耗时表现</span>
-              </div>
-              <div id="metricCards" class="row g-3"></div>
-            </div>
+      <div class="card-body p-4">
+        <form id="dashboardFilter" class="row g-3 align-items-end">
+          <div class="col-12 col-sm-6 col-xl-2">
+            <label for="hours" class="form-label" data-i18n="filters.timeWindow">时间窗口</label>
+            <select id="hours" class="form-select">
+              <option value="1" data-i18n="time.lastHours" data-i18n-count="1">最近 1 小时</option>
+              <option value="6" data-i18n="time.lastHours" data-i18n-count="6">最近 6 小时</option>
+              <option value="24" data-i18n="time.lastHours" data-i18n-count="24" selected>最近 24 小时</option>
+              <option value="72" data-i18n="time.lastHours" data-i18n-count="72">最近 72 小时</option>
+              <option value="168" data-i18n="time.lastDays" data-i18n-count="7">最近 7 天</option>
+            </select>
           </div>
-
-          <div class="card shadow-sm border-0 mb-4">
-            <div class="card-body p-4">
-              <div class="d-flex justify-content-between align-items-center mb-3">
-                <h2 class="h3 text-body-emphasis mb-0">流量与耗时趋势</h2>
-                <span class="text-secondary">吞吐、错误和平均耗时</span>
-              </div>
-              <div id="trendChart" class="chart-host"></div>
-            </div>
+          <div class="col-12 col-sm-6 col-xl-3">
+            <label for="path" class="form-label" data-i18n="fields.pathPrefix">Path 前缀</label>
+            <input id="path" class="form-control" placeholder="例如 /api/public" data-i18n-placeholder="placeholders.path">
           </div>
-
-          <div class="row g-4">
-            <div class="col-12 col-lg-6">
-              <div class="card shadow-sm border-0 h-100">
-                <div class="card-body">
-                  <div class="d-flex justify-content-between align-items-center mb-3">
-                    <h3 class="h5 text-body-emphasis mb-0">高频接口路径</h3>
-                    <span class="text-secondary small">前 8 项</span>
-                  </div>
-                  <div id="topPaths" class="bar-list"></div>
-                </div>
-              </div>
-            </div>
-            <div class="col-12 col-lg-6">
-              <div class="card shadow-sm border-0 h-100">
-                <div class="card-body">
-                  <div class="d-flex justify-content-between align-items-center mb-3">
-                    <h3 class="h5 text-body-emphasis mb-0">状态码构成</h3>
-                    <span class="text-secondary small">前 8 项</span>
-                  </div>
-                  <div id="statusDist" class="bar-list"></div>
-                </div>
-              </div>
-            </div>
-            <div class="col-12 col-lg-6">
-              <div class="card shadow-sm border-0 h-100">
-                <div class="card-body">
-                  <div class="d-flex justify-content-between align-items-center mb-3">
-                    <h3 class="h5 text-body-emphasis mb-0">活跃 API Key</h3>
-                    <span class="text-secondary small">原始值</span>
-                  </div>
-                  <div id="topKeys" class="bar-list"></div>
-                </div>
-              </div>
-            </div>
-            <div class="col-12 col-lg-6">
-              <div class="card shadow-sm border-0 h-100">
-                <div class="card-body">
-                  <div class="d-flex justify-content-between align-items-center mb-3">
-                    <h3 class="h5 text-body-emphasis mb-0">高频任务类型</h3>
-                    <span class="text-secondary small">前 8 项</span>
-                  </div>
-                  <div id="topTasks" class="bar-list"></div>
-                </div>
-              </div>
-            </div>
+          <div class="col-12 col-sm-6 col-xl-2">
+            <label for="method" class="form-label" data-i18n="fields.method">Method</label>
+            <input id="method" class="form-control text-uppercase" placeholder="例如 POST" data-i18n-placeholder="placeholders.method" maxlength="16">
           </div>
+          <div class="col-12 col-sm-6 col-xl-2">
+            <label for="taskType" class="form-label" data-i18n="fields.taskType">任务类型</label>
+            <input id="taskType" class="form-control" placeholder="精确匹配" data-i18n-placeholder="placeholders.exactMatch">
+          </div>
+          <div class="col-12 col-md-8 col-xl-2">
+            <label for="apiKey" class="form-label" data-i18n="fields.apiKey">API Key</label>
+            <input id="apiKey" class="form-control" placeholder="精确匹配" data-i18n-placeholder="placeholders.exactMatch" autocomplete="off">
+          </div>
+          <div class="col-12 col-md-4 col-xl-1 d-grid">
+            <button id="refreshButton" type="submit" class="btn btn-primary">
+              <span id="refreshSpinner" class="spinner-border spinner-border-sm me-1 d-none" aria-hidden="true"></span>
+              <i id="refreshIcon" class="bi bi-arrow-clockwise app-icon me-1" aria-hidden="true"></i>
+              <span data-i18n="actions.refresh">刷新</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <section id="metricCards" class="row g-3 g-xl-4 mb-4" aria-label="错误概览" data-i18n-aria-label="overview.ariaLabel" aria-live="polite">
+      <div class="col-12 text-center py-5 text-body-secondary">
+        <div class="spinner-border text-primary mb-3" role="status"><span class="visually-hidden" data-i18n="states.loading">正在加载</span></div>
+        <div data-i18n="states.calculatingErrorRate">正在计算错误率…</div>
+      </div>
+    </section>
+
+    <section class="card report-card mb-4" aria-labelledby="reportTitle">
+      <div class="card-header bg-white px-4 py-3 d-flex flex-column flex-md-row justify-content-between gap-2">
+        <div>
+          <h2 id="reportTitle" class="section-title paper-heading h5 mb-1"><i class="bi bi-file-earmark-text app-icon" aria-hidden="true"></i><span data-i18n="report.title">报告摘要</span></h2>
+          <p class="small text-body-secondary mb-0" data-i18n="report.help">综合当前筛选窗口内的非 200 数据，结论会随筛选自动更新。</p>
         </div>
+        <span class="badge rounded-pill bg-body-secondary text-body align-self-start" data-i18n="report.generated">数据驱动结论</span>
+      </div>
+      <ol id="reportFindings" class="list-group list-group-numbered list-group-flush report-findings" aria-live="polite"></ol>
+      <div class="card-footer bg-white px-4 py-3">
+        <span class="figure-note" data-i18n="report.dimensions">综合维度：总体 · 状态码 · 接口 · Method · 时间 · API Key · 任务类型</span>
+      </div>
+    </section>
 
-        <div class="col-12 col-xxl-4">
-          <div class="card shadow-sm border-0 mb-4">
-            <div class="card-body p-4">
-              <div class="d-flex justify-content-between align-items-center mb-3">
-                <h2 class="h3 text-body-emphasis mb-0">Recent Records</h2>
-                <span class="text-secondary">游标翻页</span>
-              </div>
-              <div class="table-responsive border">
-                <table class="table table-hover align-middle mb-0">
-                  <thead class="table-light">
-                    <tr>
-                      <th>ID</th>
-                      <th>时间</th>
-                      <th>接口</th>
-                      <th>状态</th>
-                      <th>耗时</th>
-                      <th>request_id</th>
-                      <th>task_id</th>
-                    </tr>
-                  </thead>
-                  <tbody id="recordsTable"></tbody>
-                </table>
-              </div>
-              <div class="d-flex justify-content-end mt-3">
-                <button id="loadMoreButton" class="btn btn-outline-secondary rounded-0">加载更多</button>
-              </div>
+    <section class="card mb-4" aria-labelledby="hourlyTitle">
+      <div class="card-header bg-white px-4 py-3 d-flex flex-column flex-sm-row justify-content-between gap-2">
+        <div>
+          <h2 id="hourlyTitle" class="section-title paper-heading h5 mb-1"><i class="bi bi-graph-up-arrow app-icon" aria-hidden="true"></i><span data-i18n="hourly.title">每小时非 200 请求量</span></h2>
+          <p class="small text-body-secondary mb-0" data-i18n="hourly.help">按自然小时汇总拦截数量，用于识别突增、峰值和持续异常</p>
+        </div>
+        <span id="hourlyPeakBadge" class="badge rounded-pill bg-body-secondary text-body align-self-start">—</span>
+      </div>
+      <div id="hourlyVolumeChart" class="card-body p-3 p-md-4" aria-live="polite"></div>
+    </section>
+
+    <div class="row g-4 mb-4">
+      <div class="col-12 col-xl-8">
+        <section class="card h-100" aria-labelledby="trendTitle">
+          <div class="card-header bg-white px-4 py-3 d-flex flex-column flex-sm-row justify-content-between gap-2">
+            <div>
+              <h2 id="trendTitle" class="section-title paper-heading h5 mb-1"><i class="bi bi-activity app-icon" aria-hidden="true"></i><span data-i18n="trend.title">错误率趋势</span></h2>
+              <p class="small text-body-secondary mb-0" data-i18n="trend.help">每个时间段的非 200 数量 / 总请求数</p>
+            </div>
+            <span id="bucketBadge" class="badge rounded-pill bg-body-secondary text-body align-self-start">—</span>
+          </div>
+          <div id="errorTrend" class="card-body p-0"></div>
+        </section>
+      </div>
+      <div class="col-12 col-xl-4">
+        <section class="card h-100" aria-labelledby="shareTitle">
+          <div class="card-header bg-white px-4 py-3">
+            <h2 id="shareTitle" class="section-title paper-heading h5 mb-1"><i class="bi bi-pie-chart app-icon" aria-hidden="true"></i><span data-i18n="share.title">拦截占比</span></h2>
+            <p class="small text-body-secondary mb-0" data-i18n="share.help">非 200 与 200 在全部审计请求中的构成</p>
+          </div>
+          <div id="errorShareFigure" class="card-body p-4"></div>
+        </section>
+      </div>
+    </div>
+
+    <div class="row g-4 mb-4">
+      <div class="col-12 col-xl-8">
+        <section class="card h-100" aria-labelledby="pathsTitle">
+          <div class="card-header bg-white px-4 py-3">
+            <h2 id="pathsTitle" class="paper-heading h5 mb-1" data-i18n="topPaths.title">错误量最高的接口</h2>
+            <p class="small text-body-secondary mb-0" data-i18n="topPaths.help">按非 200 数量排序，同时展示该接口自身错误率</p>
+          </div>
+          <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+              <thead class="table-light">
+                <tr>
+                  <th scope="col" class="ps-4" data-i18n="columns.endpointPath">接口路径</th>
+                  <th scope="col" class="text-end" data-i18n="columns.non200">非 200</th>
+                  <th scope="col" class="text-end" data-i18n="columns.totalRequests">总请求</th>
+                  <th scope="col" class="pe-4 error-rate-column" data-i18n="columns.errorRate">错误率</th>
+                </tr>
+              </thead>
+              <tbody id="topErrorPaths"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+      <div class="col-12 col-xl-4">
+        <section class="card h-100" aria-labelledby="statusTitle">
+          <div class="card-header bg-white px-4 py-3">
+            <h2 id="statusTitle" class="section-title paper-heading h5 mb-1"><i class="bi bi-bar-chart-line app-icon" aria-hidden="true"></i><span data-i18n="statusDistribution.title">非 200 状态码分布</span></h2>
+            <p class="small text-body-secondary mb-0" data-i18n="statusDistribution.help">各状态码占全部错误的比例，最多显示 8 项</p>
+          </div>
+          <div id="statusDistribution" class="list-group list-group-flush"></div>
+        </section>
+      </div>
+    </div>
+
+    <div class="row g-4 mb-4" aria-label="其他错误维度" data-i18n-aria-label="dimensions.aria">
+      <div class="col-12 col-lg-4">
+        <section class="card h-100" aria-labelledby="methodsTitle">
+          <div class="card-header bg-white px-4 py-3">
+            <h2 id="methodsTitle" class="paper-heading h5 mb-1" data-i18n="methods.title">Method 构成</h2>
+            <p class="small text-body-secondary mb-0" data-i18n="methods.help">错误贡献占比 / 该 Method 自身错误率</p>
+          </div>
+          <div id="errorMethodDistribution" class="list-group list-group-flush"></div>
+        </section>
+      </div>
+      <div class="col-12 col-lg-4">
+        <section class="card h-100" aria-labelledby="keysTitle">
+          <div class="card-header bg-white px-4 py-3">
+            <h2 id="keysTitle" class="paper-heading h5 mb-0" data-i18n="ranking.apiKeys">API Key 错误排行</h2>
+          </div>
+          <div id="topErrorKeys" class="list-group list-group-flush"></div>
+        </section>
+      </div>
+      <div class="col-12 col-lg-4">
+        <section class="card h-100" aria-labelledby="tasksTitle">
+          <div class="card-header bg-white px-4 py-3">
+            <h2 id="tasksTitle" class="paper-heading h5 mb-0" data-i18n="ranking.taskTypes">任务类型错误排行</h2>
+          </div>
+          <div id="topErrorTasks" class="list-group list-group-flush"></div>
+        </section>
+      </div>
+    </div>
+
+    <section class="card mb-4" aria-labelledby="latestTitle">
+      <div class="card-header bg-white px-4 py-3 d-flex flex-column flex-md-row justify-content-between gap-2">
+        <div>
+          <h2 id="latestTitle" class="section-title paper-heading h5 mb-1"><i class="bi bi-clock-history app-icon" aria-hidden="true"></i><span data-i18n="latest.title">最新非 200 请求</span></h2>
+          <p class="small text-body-secondary mb-0" data-i18n="latest.help">来自当前分析窗口，点击任一行查看完整审计内容</p>
+        </div>
+        <span class="badge rounded-pill text-bg-danger align-self-start" data-i18n="latest.limit" data-i18n-count="8">最新 8 条</span>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+          <thead class="table-light">
+            <tr>
+              <th scope="col" class="ps-4" data-i18n="columns.time">时间</th>
+              <th scope="col" data-i18n="columns.status">状态</th>
+              <th scope="col" data-i18n="columns.endpoint">接口</th>
+              <th scope="col" data-i18n="columns.duration">耗时</th>
+              <th scope="col">request_id</th>
+              <th scope="col" class="pe-4" data-i18n="columns.errorAndAction">错误码 / 操作</th>
+            </tr>
+          </thead>
+          <tbody id="latestErrors"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="recordsTitle">
+      <div class="card-header bg-white px-4 pt-4 pb-3">
+        <div class="d-flex flex-column flex-lg-row justify-content-between gap-3">
+          <div>
+            <h2 id="recordsTitle" class="section-title paper-heading h5 mb-1"><i class="bi bi-list-ul app-icon" aria-hidden="true"></i><span data-i18n="records.title">拦截明细</span></h2>
+            <p class="small text-body-secondary mb-0" data-i18n="records.help">默认仅显示非 200；精确状态码优先于范围选择</p>
+          </div>
+          <button id="resetRecordButton" type="button" class="btn btn-sm btn-outline-secondary align-self-start" data-i18n="actions.clearRecordFilters">清空明细条件</button>
+        </div>
+        <form id="recordFilter" class="row g-3 align-items-end mt-1">
+          <div class="col-12 col-sm-6 col-lg-2">
+            <label for="recordScope" class="form-label small" data-i18n="records.scope">记录范围</label>
+            <select id="recordScope" class="form-select form-select-sm">
+              <option value="errors" selected data-i18n="scope.non200Only">仅非 200</option>
+              <option value="all" data-i18n="scope.allStatuses">全部状态</option>
+            </select>
+          </div>
+          <div class="col-12 col-sm-6 col-lg-2">
+            <label for="statusCode" class="form-label small" data-i18n="fields.exactStatusCode">精确状态码</label>
+            <input id="statusCode" type="number" min="100" max="599" step="1" inputmode="numeric" class="form-control form-control-sm" placeholder="例如 400" data-i18n-placeholder="placeholders.statusCode">
+          </div>
+          <div class="col-12 col-sm-6 col-lg-2">
+            <label for="requestId" class="form-label small" data-i18n="fields.requestId">request_id</label>
+            <input id="requestId" class="form-control form-control-sm" placeholder="精确匹配" data-i18n-placeholder="placeholders.exactMatch">
+          </div>
+          <div class="col-12 col-sm-6 col-lg-2">
+            <label for="listUuid" class="form-label small" data-i18n="fields.uuid">uuid</label>
+            <input id="listUuid" class="form-control form-control-sm" placeholder="精确匹配" data-i18n-placeholder="placeholders.exactMatch">
+          </div>
+          <div class="col-12 col-sm-6 col-lg-2">
+            <label for="taskId" class="form-label small" data-i18n="fields.taskId">task_id</label>
+            <input id="taskId" class="form-control form-control-sm" placeholder="精确匹配" data-i18n-placeholder="placeholders.exactMatch">
+          </div>
+          <div class="col-12 col-sm-6 col-lg-2">
+            <label for="errorCode" class="form-label small" data-i18n="fields.errorCode">错误码</label>
+            <div class="input-group input-group-sm">
+              <input id="errorCode" class="form-control" placeholder="精确" data-i18n-placeholder="placeholders.exact">
+              <button id="searchButton" type="submit" class="btn btn-primary"><i class="bi bi-search app-icon me-1" aria-hidden="true"></i><span data-i18n="actions.search">查询</span></button>
             </div>
           </div>
+        </form>
+      </div>
+      <div class="table-responsive records-table-wrap">
+        <table class="table table-hover align-middle mb-0">
+          <thead class="table-light">
+            <tr>
+              <th scope="col" class="ps-4">ID</th>
+              <th scope="col" data-i18n="columns.time">时间</th>
+              <th scope="col" data-i18n="columns.status">状态</th>
+              <th scope="col">Method / Path</th>
+              <th scope="col" data-i18n="columns.duration">耗时</th>
+              <th scope="col">request_id</th>
+              <th scope="col">task_id</th>
+              <th scope="col" class="pe-4" data-i18n="columns.errorAndAction">错误码 / 操作</th>
+            </tr>
+          </thead>
+          <tbody id="recordsTable"></tbody>
+        </table>
+      </div>
+      <div class="card-footer bg-white border-0 p-4 d-flex flex-column flex-sm-row justify-content-between align-items-sm-center gap-2">
+        <span id="recordCount" class="small text-body-secondary" aria-live="polite">—</span>
+        <button id="loadMoreButton" type="button" class="btn btn-outline-primary btn-sm">
+          <span id="loadMoreSpinner" class="spinner-border spinner-border-sm me-1 d-none" aria-hidden="true"></span>
+          <span data-i18n="actions.loadMore">加载更多</span>
+        </button>
+      </div>
+    </section>
+  </main>
 
-          <div class="card shadow-sm border-0">
-            <div class="card-body p-4">
-              <div class="d-flex justify-content-between align-items-center mb-3">
-                <h2 class="h3 text-body-emphasis mb-0">Request Detail</h2>
-                <span class="text-secondary">头、体和任务信息</span>
+  <div class="modal fade" id="detailModal" tabindex="-1" aria-labelledby="detailModalTitle" aria-hidden="true" style="display: none;">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+      <div class="modal-content border-0 shadow">
+        <div class="modal-header">
+          <div>
+            <div class="d-flex align-items-center gap-2 mb-1">
+              <h2 id="detailModalTitle" class="modal-title paper-heading h5 mb-0" data-i18n="detail.title">请求详情</h2>
+              <span id="detailStatus"></span>
+            </div>
+            <div id="detailSubtitle" class="small text-body-secondary">—</div>
+          </div>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭" data-i18n-aria-label="common.close"></button>
+        </div>
+        <div class="modal-body p-4">
+          <div id="detailLoading" class="text-center py-5 d-none">
+            <div class="spinner-border text-primary" role="status"><span class="visually-hidden" data-i18n="states.loading">正在加载</span></div>
+          </div>
+          <div id="detailError" class="alert alert-danger d-none" role="alert"></div>
+          <div id="detailContent">
+            <div id="detailMeta" class="row g-3 mb-4"></div>
+            <div class="accordion" id="detailAccordion">
+              <div class="accordion-item">
+                <h3 class="accordion-header">
+                  <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#requestBodyPanel" aria-expanded="true" aria-controls="requestBodyPanel" data-i18n="detail.requestBody">请求体</button>
+                </h3>
+                <div id="requestBodyPanel" class="accordion-collapse collapse show" data-bs-parent="#detailAccordion">
+                  <div class="accordion-body p-0"><pre id="requestBody" class="app-pre mb-0"></pre></div>
+                </div>
               </div>
-              <div id="detailMeta" class="row g-2 mb-3"></div>
-              <div class="row g-3">
-                <div class="col-12 col-md-6">
-                  <div class="border p-3 h-100">
-                    <h3 class="h6 text-body-emphasis mb-3">请求头</h3>
-                    <pre id="requestHeaders" class="app-pre mb-0"></pre>
-                  </div>
+              <div class="accordion-item">
+                <h3 class="accordion-header">
+                  <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#responseBodyPanel" aria-expanded="false" aria-controls="responseBodyPanel" data-i18n="detail.responseBody">响应体</button>
+                </h3>
+                <div id="responseBodyPanel" class="accordion-collapse collapse" data-bs-parent="#detailAccordion">
+                  <div class="accordion-body p-0"><pre id="responseBody" class="app-pre mb-0"></pre></div>
                 </div>
-                <div class="col-12 col-md-6">
-                  <div class="border p-3 h-100">
-                    <h3 class="h6 text-body-emphasis mb-3">响应头</h3>
-                    <pre id="responseHeaders" class="app-pre mb-0"></pre>
-                  </div>
+              </div>
+              <div class="accordion-item">
+                <h3 class="accordion-header">
+                  <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#requestHeadersPanel" aria-expanded="false" aria-controls="requestHeadersPanel" data-i18n="detail.requestHeaders">请求头</button>
+                </h3>
+                <div id="requestHeadersPanel" class="accordion-collapse collapse" data-bs-parent="#detailAccordion">
+                  <div class="accordion-body p-0"><pre id="requestHeaders" class="app-pre mb-0"></pre></div>
                 </div>
-                <div class="col-12 col-md-6">
-                  <div class="border p-3 h-100">
-                    <h3 class="h6 text-body-emphasis mb-3">请求体</h3>
-                    <pre id="requestBody" class="app-pre mb-0"></pre>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="border p-3 h-100">
-                    <h3 class="h6 text-body-emphasis mb-3">响应体</h3>
-                    <pre id="responseBody" class="app-pre mb-0"></pre>
-                  </div>
+              </div>
+              <div class="accordion-item">
+                <h3 class="accordion-header">
+                  <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#responseHeadersPanel" aria-expanded="false" aria-controls="responseHeadersPanel" data-i18n="detail.responseHeaders">响应头</button>
+                </h3>
+                <div id="responseHeadersPanel" class="accordion-collapse collapse" data-bs-parent="#detailAccordion">
+                  <div class="accordion-body p-0"><pre id="responseHeaders" class="app-pre mb-0"></pre></div>
                 </div>
               </div>
             </div>
@@ -251,6 +372,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous"></script>
+  <script src="/assets/i18n.js"></script>
   <script src="/assets/app.js"></script>
 </body>
 </html>

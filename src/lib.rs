@@ -8,5 +8,7 @@ pub mod db;
 pub mod handler;
 #[path = "../internal/model/mod.rs"]
 pub mod model;
+#[path = "../internal/retention/mod.rs"]
+pub mod retention;
 #[path = "../internal/service/mod.rs"]
 pub mod service;

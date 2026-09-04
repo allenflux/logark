@@ -11,6 +11,9 @@ pub struct Config {
     pub max_window_hours: u32,
     pub max_list_limit: u32,
     pub slow_request_ms: i32,
+    pub audit_retention_days: u32,
+    pub audit_cleanup_interval_secs: u64,
+    pub audit_cleanup_batch_size: u32,
     pub tg_bot_token: Option<String>,
     pub tg_chat_id: Option<String>,
     pub tg_poll_interval_secs: u64,
@@ -32,6 +35,19 @@ impl Config {
             max_window_hours: env_u32("LOGARK_MAX_WINDOW_HOURS", 168),
             max_list_limit: env_u32("LOGARK_MAX_LIST_LIMIT", 100),
             slow_request_ms: env_i32("LOGARK_SLOW_REQUEST_MS", 1000),
+            audit_retention_days: env_u32_in_range("LOGARK_AUDIT_RETENTION_DAYS", 30, 1, 3_650)?,
+            audit_cleanup_interval_secs: env_u64_in_range(
+                "LOGARK_AUDIT_CLEANUP_INTERVAL_SECS",
+                3_600,
+                60,
+                604_800,
+            )?,
+            audit_cleanup_batch_size: env_u32_in_range(
+                "LOGARK_AUDIT_CLEANUP_BATCH_SIZE",
+                1_000,
+                1,
+                10_000,
+            )?,
             tg_bot_token: env_opt("TG_BOT_TOKEN"),
             tg_chat_id: env_opt("TG_CHAT_ID"),
             tg_poll_interval_secs: env_u64("TG_POLL_INTERVAL_SECS", 10),
@@ -66,6 +82,38 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+fn env_u32_in_range(key: &str, default: u32, min: u32, max: u32) -> anyhow::Result<u32> {
+    let value = match env::var(key) {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => return Ok(default),
+        Err(error) => return Err(error).with_context(|| format!("failed to read {key}")),
+    };
+    let parsed = value
+        .parse::<u32>()
+        .with_context(|| format!("{key} must be an integer between {min} and {max}"))?;
+    anyhow::ensure!(
+        (min..=max).contains(&parsed),
+        "{key} must be between {min} and {max}"
+    );
+    Ok(parsed)
+}
+
+fn env_u64_in_range(key: &str, default: u64, min: u64, max: u64) -> anyhow::Result<u64> {
+    let value = match env::var(key) {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => return Ok(default),
+        Err(error) => return Err(error).with_context(|| format!("failed to read {key}")),
+    };
+    let parsed = value
+        .parse::<u64>()
+        .with_context(|| format!("{key} must be an integer between {min} and {max}"))?;
+    anyhow::ensure!(
+        (min..=max).contains(&parsed),
+        "{key} must be between {min} and {max}"
+    );
+    Ok(parsed)
 }
 
 fn env_i32(key: &str, default: i32) -> i32 {

@@ -12,7 +12,7 @@ use crate::{
     model::{
         AuditRecordDetail, AuditRecordSummary, BidReport, BidReportWindow, BidStatusCodeStat,
         BidWatchItem, DashboardQuery, DashboardResponse, DashboardSummary, DashboardWindow,
-        MetricSlice, RecordListQuery, RecordListResponse, TimelinePoint,
+        ErrorRateSlice, MetricSlice, RecordListQuery, RecordListResponse, TimelinePoint,
     },
 };
 
@@ -61,19 +61,31 @@ impl AuditAnalyticsService {
             api_key: normalize_str(query.api_key),
             task_type: normalize_str(query.task_type),
         };
-        let cache_key = dashboard_cache_key(&window, &filter);
+        let cache_key = dashboard_cache_key(&window, &filter, self.config.analytics_cache_ttl_secs);
 
         if let Some(payload) = self.get_cached_dashboard(&cache_key).await {
             return Ok(payload);
         }
 
-        let summary = self.fetch_summary(&window, &filter).await?;
-        let throughput = self.fetch_timeline(&window, &filter).await?;
-        let top_paths = self.fetch_top_paths(&window, &filter).await?;
-        let status_distribution = self.fetch_status_distribution(&window, &filter).await?;
-        let top_api_keys = self.fetch_top_api_keys(&window, &filter).await?;
-        let top_task_types = self.fetch_top_task_types(&window, &filter).await?;
-        let latest_errors = self.fetch_latest_errors(&window, &filter).await?;
+        let (
+            summary,
+            error_timeline,
+            top_error_paths,
+            error_status_distribution,
+            error_method_distribution,
+            top_error_api_keys,
+            top_error_task_types,
+            latest_errors,
+        ) = tokio::try_join!(
+            self.fetch_summary(&window, &filter),
+            self.fetch_timeline(&window, &filter),
+            self.fetch_top_error_paths(&window, &filter),
+            self.fetch_error_status_distribution(&window, &filter),
+            self.fetch_error_method_distribution(&window, &filter),
+            self.fetch_top_error_api_keys(&window, &filter),
+            self.fetch_top_error_task_types(&window, &filter),
+            self.fetch_latest_errors(&window, &filter),
+        )?;
 
         let payload = DashboardResponse {
             window: DashboardWindow {
@@ -83,12 +95,12 @@ impl AuditAnalyticsService {
                 hours: window.hours,
             },
             summary,
-            latency: throughput.clone(),
-            throughput,
-            top_paths,
-            status_distribution,
-            top_api_keys,
-            top_task_types,
+            error_timeline,
+            error_status_distribution,
+            error_method_distribution,
+            top_error_paths,
+            top_error_api_keys,
+            top_error_task_types,
             latest_errors,
         };
 
@@ -134,9 +146,7 @@ impl AuditAnalyticsService {
         if let Some(api_key) = normalize_str(query.api_key) {
             qb.push(" AND api_key = ").push_bind(api_key);
         }
-        if let Some(status_code) = query.status_code {
-            qb.push(" AND status_code = ").push_bind(status_code);
-        }
+        push_record_status_filter(&mut qb, query.status_code, query.non_200.unwrap_or(false));
         if let Some(task_type) = normalize_str(query.task_type) {
             qb.push(" AND task_type = ").push_bind(task_type);
         }
@@ -377,10 +387,11 @@ impl AuditAnalyticsService {
             300_000
         } else if hours <= 24 {
             900_000
-        } else if hours <= 72 {
-            3_600_000
         } else {
-            10_800_000
+            // Keep an exact hourly series even for the seven-day view. The
+            // browser merges it only for the compact table; the volume chart
+            // still retains one point per hour.
+            3_600_000
         };
 
         AnalyticsWindow {
@@ -422,11 +433,14 @@ impl AuditAnalyticsService {
     ) -> anyhow::Result<DashboardSummary> {
         let mut qb: QueryBuilder<MySql> = QueryBuilder::new(
             "SELECT CAST(COUNT(*) AS SIGNED) AS total_requests, \
-             CAST(COALESCE(SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END), 0) AS SIGNED) AS error_requests, \
+             CAST(COALESCE(SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END), 0) AS SIGNED) AS successful_requests, \
+             CAST(COALESCE(SUM(CASE WHEN status_code <> 200 THEN 1 ELSE 0 END), 0) AS SIGNED) AS error_requests, \
              CAST(COALESCE(AVG(duration_ms), 0) AS DOUBLE) AS avg_duration_ms, \
+             CAST(COALESCE(AVG(CASE WHEN status_code <> 200 THEN duration_ms END), 0) AS DOUBLE) AS avg_error_duration_ms, \
              CAST(COALESCE(MAX(duration_ms), 0) AS SIGNED) AS max_duration_ms, \
              CAST(COUNT(DISTINCT NULLIF(api_key, '')) AS SIGNED) AS unique_api_keys, \
-             CAST(COUNT(DISTINCT NULLIF(task_id, '')) AS SIGNED) AS unique_task_ids \
+             CAST(COUNT(DISTINCT NULLIF(task_id, '')) AS SIGNED) AS unique_task_ids, \
+             CAST(COUNT(DISTINCT CASE WHEN status_code <> 200 THEN NULLIF(path, '') END) AS SIGNED) AS affected_paths \
              FROM api_audit_log WHERE request_ts BETWEEN ",
         );
         qb.push_bind(window.from_ts)
@@ -436,29 +450,33 @@ impl AuditAnalyticsService {
 
         let row = qb.build().fetch_one(&self.pool).await?;
         let total_requests: i64 = row.try_get("total_requests")?;
+        let successful_requests: i64 = row.try_get("successful_requests")?;
         let error_requests: i64 = row.try_get("error_requests")?;
         let avg_duration_ms: f64 = row.try_get("avg_duration_ms")?;
+        let avg_error_duration_ms: f64 = row.try_get("avg_error_duration_ms")?;
         let max_duration_ms: i64 = row.try_get("max_duration_ms")?;
         let unique_api_keys: i64 = row.try_get("unique_api_keys")?;
         let unique_task_ids: i64 = row.try_get("unique_task_ids")?;
+        let affected_paths: i64 = row.try_get("affected_paths")?;
         let p95_duration_ms = self
             .fetch_p95_duration(window, filter, total_requests)
             .await?;
-        let success_rate = if total_requests == 0 {
-            100.0
-        } else {
-            ((total_requests - error_requests) as f64 / total_requests as f64) * 100.0
-        };
+        let error_rate = percentage(error_requests, total_requests);
+        let success_rate = percentage(successful_requests, total_requests);
 
         Ok(DashboardSummary {
             total_requests,
+            successful_requests,
             error_requests,
+            error_rate,
             success_rate,
             avg_duration_ms,
+            avg_error_duration_ms,
             max_duration_ms: i32::try_from(max_duration_ms).unwrap_or(i32::MAX),
             p95_duration_ms,
             unique_api_keys,
             unique_task_ids,
+            affected_paths,
         })
     }
 
@@ -503,7 +521,7 @@ impl AuditAnalyticsService {
             .push(" AS SIGNED)")
             .push(
                 " AS ts, CAST(COUNT(*) AS SIGNED) AS count, CAST(COALESCE(AVG(duration_ms), 0) AS DOUBLE) AS avg_duration_ms, \
-                 CAST(COALESCE(SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END), 0) AS SIGNED) AS error_count \
+                 CAST(COALESCE(SUM(CASE WHEN status_code <> 200 THEN 1 ELSE 0 END), 0) AS SIGNED) AS error_count \
                  FROM api_audit_log WHERE request_ts BETWEEN ",
             )
             .push_bind(window.from_ts)
@@ -515,34 +533,38 @@ impl AuditAnalyticsService {
         let rows = qb.build().fetch_all(&self.pool).await?;
         rows.into_iter()
             .map(|row| {
+                let count = row.try_get("count")?;
+                let error_count = row.try_get("error_count")?;
                 Ok(TimelinePoint {
                     ts: row.try_get("ts")?,
-                    count: row.try_get("count")?,
+                    count,
                     avg_duration_ms: row.try_get("avg_duration_ms")?,
-                    error_count: row.try_get("error_count")?,
+                    error_count,
+                    error_rate: percentage(error_count, count),
                 })
             })
             .collect()
     }
 
-    async fn fetch_top_paths(
+    async fn fetch_top_error_paths(
         &self,
         window: &AnalyticsWindow,
         filter: &CommonFilter,
-    ) -> anyhow::Result<Vec<MetricSlice>> {
-        self.fetch_top_dimension(window, filter, "path", 8).await
-    }
-
-    async fn fetch_top_task_types(
-        &self,
-        window: &AnalyticsWindow,
-        filter: &CommonFilter,
-    ) -> anyhow::Result<Vec<MetricSlice>> {
-        self.fetch_top_dimension(window, filter, "task_type", 8)
+    ) -> anyhow::Result<Vec<ErrorRateSlice>> {
+        self.fetch_top_error_dimension(window, filter, "path", 10)
             .await
     }
 
-    async fn fetch_status_distribution(
+    async fn fetch_top_error_task_types(
+        &self,
+        window: &AnalyticsWindow,
+        filter: &CommonFilter,
+    ) -> anyhow::Result<Vec<ErrorRateSlice>> {
+        self.fetch_top_error_dimension(window, filter, "task_type", 8)
+            .await
+    }
+
+    async fn fetch_error_status_distribution(
         &self,
         window: &AnalyticsWindow,
         filter: &CommonFilter,
@@ -553,7 +575,8 @@ impl AuditAnalyticsService {
         );
         qb.push_bind(window.from_ts)
             .push(" AND ")
-            .push_bind(window.to_ts);
+            .push_bind(window.to_ts)
+            .push(" AND status_code <> 200");
         push_common_filters(&mut qb, filter);
         qb.push(" GROUP BY status_code ORDER BY value DESC, status_code ASC LIMIT 8");
 
@@ -568,31 +591,22 @@ impl AuditAnalyticsService {
             .collect()
     }
 
-    async fn fetch_top_api_keys(
+    async fn fetch_error_method_distribution(
         &self,
         window: &AnalyticsWindow,
         filter: &CommonFilter,
-    ) -> anyhow::Result<Vec<MetricSlice>> {
-        let mut qb: QueryBuilder<MySql> = QueryBuilder::new(
-            "SELECT api_key AS label, CAST(COUNT(*) AS SIGNED) AS value \
-             FROM api_audit_log WHERE request_ts BETWEEN ",
-        );
-        qb.push_bind(window.from_ts)
-            .push(" AND ")
-            .push_bind(window.to_ts)
-            .push(" AND api_key IS NOT NULL AND api_key != ''");
-        push_common_filters(&mut qb, filter);
-        qb.push(" GROUP BY api_key ORDER BY value DESC, api_key ASC LIMIT 8");
+    ) -> anyhow::Result<Vec<ErrorRateSlice>> {
+        self.fetch_top_error_dimension(window, filter, "method", 8)
+            .await
+    }
 
-        let rows = qb.build().fetch_all(&self.pool).await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(MetricSlice {
-                    label: row.try_get("label")?,
-                    value: row.try_get("value")?,
-                })
-            })
-            .collect()
+    async fn fetch_top_error_api_keys(
+        &self,
+        window: &AnalyticsWindow,
+        filter: &CommonFilter,
+    ) -> anyhow::Result<Vec<ErrorRateSlice>> {
+        self.fetch_top_error_dimension(window, filter, "api_key", 8)
+            .await
     }
 
     async fn fetch_latest_errors(
@@ -607,7 +621,7 @@ impl AuditAnalyticsService {
         qb.push_bind(window.from_ts)
             .push(" AND ")
             .push_bind(window.to_ts)
-            .push(" AND status_code >= 400");
+            .push(" AND status_code <> 200");
         push_common_filters(&mut qb, filter);
         qb.push(" ORDER BY request_ts DESC, id DESC LIMIT 8");
 
@@ -618,16 +632,20 @@ impl AuditAnalyticsService {
         Ok(rows)
     }
 
-    async fn fetch_top_dimension(
+    async fn fetch_top_error_dimension(
         &self,
         window: &AnalyticsWindow,
         filter: &CommonFilter,
         column: &str,
         limit: i64,
-    ) -> anyhow::Result<Vec<MetricSlice>> {
+    ) -> anyhow::Result<Vec<ErrorRateSlice>> {
         let mut qb: QueryBuilder<MySql> = QueryBuilder::new("SELECT ");
         qb.push(column)
-            .push(" AS label, CAST(COUNT(*) AS SIGNED) AS value FROM api_audit_log WHERE request_ts BETWEEN ")
+            .push(
+                " AS label, CAST(COUNT(*) AS SIGNED) AS total_requests, \
+                 CAST(COALESCE(SUM(CASE WHEN status_code <> 200 THEN 1 ELSE 0 END), 0) AS SIGNED) AS error_requests \
+                 FROM api_audit_log WHERE request_ts BETWEEN ",
+            )
             .push_bind(window.from_ts)
             .push(" AND ")
             .push_bind(window.to_ts)
@@ -639,7 +657,10 @@ impl AuditAnalyticsService {
         push_common_filters(&mut qb, filter);
         qb.push(" GROUP BY ")
             .push(column)
-            .push(" ORDER BY value DESC, ")
+            .push(
+                " HAVING error_requests > 0 \
+                 ORDER BY error_requests DESC, total_requests DESC, ",
+            )
             .push(column)
             .push(" ASC LIMIT ")
             .push_bind(limit);
@@ -647,9 +668,13 @@ impl AuditAnalyticsService {
         let rows = qb.build().fetch_all(&self.pool).await?;
         rows.into_iter()
             .map(|row| {
-                Ok(MetricSlice {
+                let total_requests = row.try_get("total_requests")?;
+                let error_requests = row.try_get("error_requests")?;
+                Ok(ErrorRateSlice {
                     label: row.try_get("label")?,
-                    value: row.try_get("value")?,
+                    total_requests,
+                    error_requests,
+                    error_rate: percentage(error_requests, total_requests),
                 })
             })
             .collect()
@@ -715,6 +740,18 @@ fn push_common_filters<'a>(qb: &mut QueryBuilder<'a, MySql>, filter: &'a CommonF
     }
 }
 
+fn push_record_status_filter(
+    qb: &mut QueryBuilder<'_, MySql>,
+    status_code: Option<i16>,
+    non_200: bool,
+) {
+    if let Some(status_code) = status_code {
+        qb.push(" AND status_code = ").push_bind(status_code);
+    } else if non_200 {
+        qb.push(" AND status_code <> 200");
+    }
+}
+
 fn normalize_str(value: Option<String>) -> Option<String> {
     value.and_then(|v| {
         let trimmed = v.trim();
@@ -726,14 +763,122 @@ fn normalize_str(value: Option<String>) -> Option<String> {
     })
 }
 
-fn dashboard_cache_key(window: &AnalyticsWindow, filter: &CommonFilter) -> String {
+fn percentage(part: i64, total: i64) -> f64 {
+    if total <= 0 {
+        0.0
+    } else {
+        (part as f64 / total as f64) * 100.0
+    }
+}
+
+fn dashboard_cache_key(
+    window: &AnalyticsWindow,
+    filter: &CommonFilter,
+    cache_ttl_secs: u64,
+) -> String {
+    let cache_bucket_ms = i64::try_from(cache_ttl_secs.max(1))
+        .unwrap_or(i64::MAX / 1_000)
+        .saturating_mul(1_000);
     format!(
-        "{}:{}:{}:{}:{}:{}",
-        window.from_ts,
-        window.to_ts / 15,
-        filter.path.as_deref().unwrap_or("-"),
-        filter.method.as_deref().unwrap_or("-"),
-        filter.api_key.as_deref().unwrap_or("-"),
-        filter.task_type.as_deref().unwrap_or("-"),
+        "{}:{}:{}{}{}{}",
+        window.hours,
+        window.to_ts / cache_bucket_ms,
+        cache_filter_part(filter.path.as_deref()),
+        cache_filter_part(filter.method.as_deref()),
+        cache_filter_part(filter.api_key.as_deref()),
+        cache_filter_part(filter.task_type.as_deref()),
     )
+}
+
+fn cache_filter_part(value: Option<&str>) -> String {
+    match value {
+        Some(value) => format!("s{}:{};", value.len(), value),
+        None => "n;".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percentage_uses_zero_for_an_empty_window() {
+        assert_eq!(percentage(0, 0), 0.0);
+    }
+
+    #[test]
+    fn percentage_reports_non_200_share() {
+        assert!((percentage(3, 8) - 37.5).abs() < f64::EPSILON);
+        assert!((percentage(8, 8) - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn dashboard_cache_key_is_stable_inside_ttl_bucket() {
+        let filter = CommonFilter {
+            path: None,
+            method: None,
+            api_key: None,
+            task_type: None,
+        };
+        let first = AnalyticsWindow {
+            from_ts: 1,
+            to_ts: 30_001,
+            hours: 24,
+            bucket_ms: 900_000,
+        };
+        let second = AnalyticsWindow {
+            from_ts: 2,
+            to_ts: 30_999,
+            hours: 24,
+            bucket_ms: 900_000,
+        };
+
+        assert_eq!(
+            dashboard_cache_key(&first, &filter, 15),
+            dashboard_cache_key(&second, &filter, 15)
+        );
+    }
+
+    #[test]
+    fn dashboard_cache_key_distinguishes_empty_and_literal_placeholder_filters() {
+        let window = AnalyticsWindow {
+            from_ts: 1,
+            to_ts: 30_001,
+            hours: 24,
+            bucket_ms: 900_000,
+        };
+        let empty_filter = CommonFilter {
+            path: None,
+            method: None,
+            api_key: None,
+            task_type: None,
+        };
+        let literal_filter = CommonFilter {
+            path: Some("-".to_string()),
+            method: None,
+            api_key: None,
+            task_type: None,
+        };
+
+        assert_ne!(
+            dashboard_cache_key(&window, &empty_filter, 15),
+            dashboard_cache_key(&window, &literal_filter, 15)
+        );
+    }
+
+    #[test]
+    fn record_status_filter_selects_non_200_only_when_no_exact_code_is_given() {
+        let mut only_errors = QueryBuilder::<MySql>::new("SELECT 1 WHERE 1 = 1");
+        push_record_status_filter(&mut only_errors, None, true);
+        assert!(only_errors.sql().contains("status_code <> 200"));
+
+        let mut exact_code = QueryBuilder::<MySql>::new("SELECT 1 WHERE 1 = 1");
+        push_record_status_filter(&mut exact_code, Some(201), true);
+        assert!(exact_code.sql().contains("status_code = ?"));
+        assert!(!exact_code.sql().contains("status_code <> 200"));
+
+        let mut all_statuses = QueryBuilder::<MySql>::new("SELECT 1 WHERE 1 = 1");
+        push_record_status_filter(&mut all_statuses, None, false);
+        assert!(!all_statuses.sql().contains("status_code"));
+    }
 }

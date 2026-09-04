@@ -71,6 +71,7 @@ pub struct RecordListQuery {
     pub method: Option<String>,
     pub api_key: Option<String>,
     pub status_code: Option<i16>,
+    pub non_200: Option<bool>,
     pub task_type: Option<String>,
     pub error_code: Option<String>,
 }
@@ -88,12 +89,12 @@ pub struct HealthResponse {
 pub struct DashboardResponse {
     pub window: DashboardWindow,
     pub summary: DashboardSummary,
-    pub throughput: Vec<TimelinePoint>,
-    pub latency: Vec<TimelinePoint>,
-    pub top_paths: Vec<MetricSlice>,
-    pub status_distribution: Vec<MetricSlice>,
-    pub top_api_keys: Vec<MetricSlice>,
-    pub top_task_types: Vec<MetricSlice>,
+    pub error_timeline: Vec<TimelinePoint>,
+    pub error_status_distribution: Vec<MetricSlice>,
+    pub error_method_distribution: Vec<ErrorRateSlice>,
+    pub top_error_paths: Vec<ErrorRateSlice>,
+    pub top_error_api_keys: Vec<ErrorRateSlice>,
+    pub top_error_task_types: Vec<ErrorRateSlice>,
     pub latest_errors: Vec<AuditRecordSummary>,
 }
 
@@ -108,13 +109,17 @@ pub struct DashboardWindow {
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardSummary {
     pub total_requests: i64,
+    pub successful_requests: i64,
     pub error_requests: i64,
+    pub error_rate: f64,
     pub success_rate: f64,
     pub avg_duration_ms: f64,
+    pub avg_error_duration_ms: f64,
     pub max_duration_ms: i32,
     pub p95_duration_ms: i32,
     pub unique_api_keys: i64,
     pub unique_task_ids: i64,
+    pub affected_paths: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -123,12 +128,21 @@ pub struct TimelinePoint {
     pub count: i64,
     pub avg_duration_ms: f64,
     pub error_count: i64,
+    pub error_rate: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MetricSlice {
     pub label: String,
     pub value: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ErrorRateSlice {
+    pub label: String,
+    pub total_requests: i64,
+    pub error_requests: i64,
+    pub error_rate: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,4 +181,23 @@ pub struct BidReport {
     pub window: BidReportWindow,
     pub ranking: Vec<BidStatusCodeStat>,
     pub watched: Vec<BidStatusCodeStat>,
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{extract::Query, http::Uri};
+
+    use super::RecordListQuery;
+
+    #[test]
+    fn record_list_query_parses_non_200_and_exact_status_filters() {
+        let uri: Uri = "/api/records?non_200=true&status_code=201"
+            .parse()
+            .expect("valid URI");
+        let Query(query) =
+            Query::<RecordListQuery>::try_from_uri(&uri).expect("valid record filters");
+
+        assert_eq!(query.non_200, Some(true));
+        assert_eq!(query.status_code, Some(201));
+    }
 }
