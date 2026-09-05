@@ -159,6 +159,7 @@ try {
   await page.screenshot({ path: "/tmp/logark-report-desktop.png", fullPage: true });
   await page.screenshot({ path: "/tmp/logark-report-first-screen.png" });
   await page.locator("#statisticalViews").screenshot({ path: "/tmp/logark-report-statistics.png" });
+  await page.locator(".report-footer").screenshot({ path: "/tmp/tracenote-footer.png" });
 
   await page.selectOption("#patternSort", "severity");
   assert.deepEqual(await paths(page), [patterns[1].path, patterns[0].path, patterns[2].path]);
@@ -219,7 +220,7 @@ try {
   const downloadPromise = page.waitForEvent("download");
   await page.click("#reportExportButton");
   const download = await downloadPromise;
-  assert.match(download.suggestedFilename(), /^logark-report-.*\.md$/);
+  assert.match(download.suggestedFilename(), /^tracenote-report-.*\.md$/);
   const exported = await readFile(await download.path(), "utf8");
   assert.match(exported, /fixture-request-1201/);
   assert.match(exported, /360 \/ 400/);

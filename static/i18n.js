@@ -3,9 +3,10 @@
 
   const messages = {
     "zh-CN": {
-      "meta.description": "LogArk 请求汇总、非 200 分布与典型失败样本",
-      "meta.title": "LogArk · 请求质量报告",
-      "nav.homeAria": "LogArk 首页",
+      "meta.description": "TraceNote 请求汇总、非 200 分布与典型失败样本",
+      "meta.title": "TraceNote · 请求质量报告",
+      "nav.homeAria": "TraceNote 首页",
+      "brand.author": "allen flux 制作",
       "nav.audit": "请求质量报告",
       "status.awaitingRefresh": "等待刷新",
       "page.title": "请求质量报告",
@@ -155,9 +156,10 @@
       "status.updatedAt": "更新于 {time}",
     },
     en: {
-      "meta.description": "LogArk request totals, non-200 distributions and representative failures",
-      "meta.title": "LogArk · Request quality report",
-      "nav.homeAria": "LogArk home",
+      "meta.description": "TraceNote request totals, non-200 distributions and representative failures",
+      "meta.title": "TraceNote · Request quality report",
+      "nav.homeAria": "TraceNote home",
+      "brand.author": "Made by allen flux",
       "nav.audit": "Request quality report",
       "status.awaitingRefresh": "Waiting to refresh",
       "page.title": "Request quality report",

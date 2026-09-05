@@ -520,7 +520,8 @@
   }
 }
 
-/* Reference theme: document layout and typography from the NPP / ORAU reference.
+/* Document layout and typography from the NPP / ORAU reference, with the user's
+   white, gray and muted-red identity reference for TraceNote.
    Plantin is commercial; Georgia and the existing Chinese serif families are local fallbacks. */
 :root {
   --app-bg: #fff;
@@ -531,10 +532,10 @@
   --app-rule-strong: #cfd5d8;
   --app-white: #fff;
   --app-inset: #f5f7f8;
-  --app-navy: #18204f;
+  --app-brand-gray: #6b6b6b;
   --app-link: #0160a6;
   --app-link-dark: #013a64;
-  --app-accent: #ec7d30;
+  --app-accent: #a61c2b;
   --paper-serif: Georgia, "Songti SC", "STSong", "Noto Serif CJK SC", "Source Han Serif SC", serif;
   --app-sans: Roboto, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
   --bs-font-sans-serif: var(--app-sans);
@@ -574,24 +575,25 @@ a:hover { color: var(--app-link-dark); }
 .skip-link { position: fixed; top: -100px; left: 20px; z-index: 2000; padding: 12px 20px; background: #fff; color: var(--app-link); }
 .skip-link:not(:focus) { width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .skip-link:focus { top: 8px; }
-.report-notice { color: var(--app-ink); background: var(--app-accent); }
-.notice-inner { display: flex; align-items: baseline; gap: 16px; min-height: 44px; padding-block: 10px; font-size: 14px; line-height: 24px; }
-.notice-inner strong { flex-shrink: 0; font-size: 14px; font-weight: 700; }
-.app-navbar { color: #fff; background-color: var(--app-navy); background-image: radial-gradient(circle at 7% 28%, rgba(255,255,255,.2) 0 .7px, transparent 1px), radial-gradient(circle at 24% 74%, rgba(255,255,255,.16) 0 .7px, transparent 1px), radial-gradient(circle at 36% 20%, rgba(255,255,255,.18) 0 .7px, transparent 1px), radial-gradient(circle at 53% 82%, rgba(255,255,255,.16) 0 .7px, transparent 1px), radial-gradient(circle at 69% 35%, rgba(255,255,255,.2) 0 .7px, transparent 1px), radial-gradient(circle at 84% 72%, rgba(255,255,255,.16) 0 .7px, transparent 1px), radial-gradient(circle at 96% 20%, rgba(255,255,255,.18) 0 .7px, transparent 1px); }
-.nav-inner { display: flex; align-items: center; gap: 40px; min-height: 128px; }
-.app-navbar .navbar-brand { min-width: 0; margin: 0; color: #fff; gap: 16px !important; text-decoration: none; }
-.brand-mark { width: 48px; height: 48px; border-radius: 4px; flex-shrink: 0; }
+.report-notice { color: var(--app-muted); background: #f7f7f6; border-bottom: 1px solid var(--app-rule); }
+.notice-inner { display: flex; align-items: baseline; gap: 16px; min-height: 36px; padding-block: 6px; font-size: 12px; line-height: 24px; }
+.notice-inner strong { flex-shrink: 0; color: var(--app-brand-gray); font-size: 12px; font-weight: 500; }
+.app-navbar { color: var(--app-ink); background: #d6e3ed; border-bottom: 1px solid #bbccda; }
+.nav-inner { display: flex; align-items: center; gap: 40px; min-height: 112px; }
+.app-navbar .navbar-brand { min-width: 0; margin: 0; color: var(--app-brand-gray); gap: 16px !important; text-decoration: none; }
+.brand-mark { width: 48px; height: 48px; border-radius: 0; flex-shrink: 0; }
 .brand-lockup { display: flex; flex-direction: column; gap: 4px; }
-.brand-name { font-family: var(--app-sans); font-size: 32px; line-height: 1.2; font-weight: 700; letter-spacing: -.04em; }
-.brand-subtitle { font-size: 14px; font-weight: 400; line-height: 1.4; color: #e6eff6; }
+.brand-name { font-family: var(--app-sans); font-size: 36px; line-height: 1.2; font-weight: 400; letter-spacing: -.035em; }
+.brand-accent { color: var(--app-accent); font-weight: 600; font-style: italic; }
+.brand-subtitle { font-size: 13px; font-weight: 400; line-height: 1.4; color: var(--app-muted); }
 .report-nav { display: flex; align-items: stretch; align-self: stretch; gap: 28px; margin-left: auto; }
-.report-nav a { position: relative; display: flex; align-items: center; color: #fff; text-decoration: none; font-size: 16px; line-height: 1.2; font-weight: 600; white-space: nowrap; }
-.report-nav a:hover { color: #fff; }
-.report-nav a.active::after, .report-nav a:hover::after { position: absolute; right: 0; bottom: 0; left: 0; height: 4px; background: var(--app-accent); content: ""; }
+.report-nav a { position: relative; display: flex; align-items: center; color: var(--app-muted); text-decoration: none; font-size: 15px; line-height: 1.2; font-weight: 500; white-space: nowrap; }
+.report-nav a:hover, .report-nav a.active { color: var(--app-ink); }
+.report-nav a.active::after, .report-nav a:hover::after { position: absolute; right: 0; bottom: 0; left: 0; height: 2px; background: var(--app-accent); content: ""; }
 .nav-utilities { display: flex; align-items: center; flex-shrink: 0; }
-.locale-select { min-width: 80px; width: auto; border-color: rgba(255,255,255,.4); background-color: transparent; color: #fff; font-size: 14px; padding-right: 28px; --bs-form-select-bg-img: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23fff' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3E%3C/svg%3E"); }
+.locale-select { min-width: 80px; width: auto; border-color: var(--app-rule-strong); background-color: #fff; color: var(--app-muted); font-size: 14px; padding-right: 28px; --bs-form-select-bg-img: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23566168' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3E%3C/svg%3E"); }
 .locale-select option { color: var(--app-ink); background: #fff; }
-.locale-select:focus { border-color: #fff; }
+.locale-select:focus { border-color: var(--app-link); }
 .report-breadcrumb { border-bottom: 1px solid var(--app-rule-strong); color: #444b4f; font-size: 14px; }
 .report-breadcrumb > .app-shell { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; min-height: 44px; padding-block: 8px; }
 .report-breadcrumb a { text-decoration: none; }
@@ -821,7 +823,7 @@ a:hover { color: var(--app-link-dark); }
 .disclosure-body .row > div > .report-panel { height: 100%; }
 .report-download { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); align-items: center; gap: 64px; padding: 48px 64px; background: #444b4f; color: #fff; }
 .report-document { width: 100%; max-width: 264px; min-height: 348px; padding: 24px; margin-inline: auto; background: #fff; color: var(--app-ink); border: 1px solid #d5dadd; }
-.document-brand { color: var(--app-navy); font-size: 22px; font-weight: 700; letter-spacing: -.03em; }
+.document-brand { color: var(--app-brand-gray); font-size: 22px; font-weight: 400; letter-spacing: -.03em; }
 .document-rule { height: 3px; margin: 12px 0 24px; background: var(--app-link); }
 .document-title { margin-bottom: 12px; font-family: var(--paper-serif); font-size: 24px; font-weight: 600; line-height: 1.3; }
 .document-period { margin-bottom: 20px; color: var(--app-muted); font-size: 12px; line-height: 1.6; }
@@ -840,8 +842,9 @@ a:hover { color: var(--app-link-dark); }
 .back-top { margin-top: 32px; text-align: right; }
 .back-top a { font-size: 14px; }
 .report-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 20px; padding: 32px 0 48px; color: var(--app-muted); font-size: 12px; }
-.footer-brand { color: var(--app-ink); font-size: 20px; font-weight: 700; }
+.footer-brand { color: var(--app-brand-gray); font-size: 18px; font-weight: 500; }
 .report-footer code { margin-left: auto; color: var(--app-muted); font-size: 12px; }
+.author-credit { flex-basis: 100%; margin-top: -8px; color: #6f7173; font-size: 11px; font-weight: 400; line-height: 1.6; }
 .empty-state { font-size: 14px; }
 .empty-state-mark { background: #f0f3f5; color: var(--app-muted); border-radius: 0; }
 .status-badge { min-width: 36px; border-radius: 0 !important; font-size: 12px; font-weight: 600; }
@@ -883,11 +886,12 @@ a:hover { color: var(--app-link-dark); }
   .report-download { gap: 48px; padding: 40px 48px; }
 }
 @media (max-width: 1023.98px) {
-  .nav-inner { min-height: 112px; gap: 24px; }
+  .nav-inner { min-height: 0; padding-top: 24px; flex-wrap: wrap; gap: 0; }
   .brand-mark { width: 40px; height: 40px; }
   .brand-name { font-size: 28px; }
   .brand-subtitle { max-width: 184px; white-space: normal; font-size: 12px; }
-  .report-nav { gap: 20px; }
+  .nav-utilities { margin-left: auto; }
+  .report-nav { order: 3; align-self: auto; width: 100%; min-height: 52px; margin-top: 16px; margin-left: 0; gap: 28px; }
   .report-nav a { font-size: 14px; }
   .report-layout { grid-template-columns: minmax(0, 1fr); gap: 32px; }
   .report-sidebar { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1fr); gap: 24px; border-top: 1px solid var(--app-rule); padding-top: 28px; }

@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <meta name="theme-color" content="#18204f">
-  <meta name="description" content="LogArk 非 200 拦截请求解释性分析报告" data-i18n-content="meta.description">
-  <title>LogArk · 非 200 拦截请求分析报告</title>
+  <meta name="theme-color" content="#d6e3ed">
+  <meta name="description" content="TraceNote 请求汇总、非 200 分布与典型失败样本" data-i18n-content="meta.description">
+  <title>TraceNote · 请求质量报告</title>
   <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.min.css" rel="stylesheet">
@@ -20,9 +20,9 @@
   <div class="report-notice"><div class="app-shell notice-inner"><strong data-i18n="reference.notice">审计报告</strong><span data-i18n="patterns.rule">统计口径：status_code != 200；分组仅描述重复特征，不推断根因。</span></div></div>
   <nav class="app-navbar" aria-label="主导航" data-i18n-aria-label="reportView.navAria">
     <div class="app-shell nav-inner">
-      <a class="navbar-brand d-flex align-items-center gap-2" href="/" aria-label="LogArk 首页" data-i18n-aria-label="nav.homeAria">
+      <a class="navbar-brand d-flex align-items-center gap-2" href="/" aria-label="TraceNote 首页" data-i18n-aria-label="nav.homeAria">
         <img class="brand-mark" src="/assets/favicon.svg" width="28" height="28" alt="">
-        <span class="brand-lockup"><span class="brand-name">LogArk</span><span class="brand-subtitle" data-i18n="reference.masthead">请求质量与失败分析</span></span>
+        <span class="brand-lockup"><span class="brand-name">Trace<span class="brand-accent">Note</span></span><span class="brand-subtitle" data-i18n="reference.masthead">请求质量与失败分析</span></span>
       </a>
       <div class="report-nav">
         <a href="#reportOverview" class="active" aria-current="location" data-i18n="reportView.navReport">报告总览</a>
@@ -372,11 +372,11 @@
     </section>
 
     <section id="reportDownload" class="report-download" aria-labelledby="downloadTitle">
-      <div class="report-document" aria-hidden="true"><div class="document-brand">LogArk</div><div class="document-rule"></div><div class="document-title" data-i18n="reportView.title">请求质量报告</div><div id="exportPreviewRange" class="document-period">—</div><div id="exportPreviewStats" class="document-stats"></div><div class="document-lines"><span></span><span></span><span></span></div><div class="document-footer">api_audit_log</div></div>
+      <div class="report-document" aria-hidden="true"><div class="document-brand">Trace<span class="brand-accent">Note</span></div><div class="document-rule"></div><div class="document-title" data-i18n="reportView.title">请求质量报告</div><div id="exportPreviewRange" class="document-period">—</div><div id="exportPreviewStats" class="document-stats"></div><div class="document-lines"><span></span><span></span><span></span></div><div class="document-footer">api_audit_log</div></div>
       <div class="download-copy"><h2 id="downloadTitle" data-i18n="reference.downloadTitle">保存本期报告</h2><p data-i18n="reference.downloadHelp">导出当前窗口的汇总、失败特征与样本标识。</p><button id="reportExportButton" type="button" class="btn btn-primary" disabled><i class="bi bi-download app-icon" aria-hidden="true"></i><span data-i18n="reportView.export">导出报告</span></button></div>
     </section>
     <div class="back-top"><a href="#reportOverview" data-i18n="reference.backTop">返回顶部</a></div>
-    <footer class="report-footer"><span class="footer-brand">LogArk</span><span data-i18n="reportView.footer">统计范围以当前筛选条件为准。</span><code>status_code != 200</code></footer>
+    <footer class="report-footer"><span class="footer-brand">TraceNote</span><span data-i18n="reportView.footer">统计范围以当前筛选条件为准。</span><code>status_code != 200</code><small class="author-credit" data-i18n="brand.author">allen flux 制作</small></footer>
   </main>
 
   <div class="modal fade" id="detailModal" tabindex="-1" aria-labelledby="detailModalTitle" aria-hidden="true" style="display: none;">

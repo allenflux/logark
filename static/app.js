@@ -650,7 +650,7 @@ function exportReport() {
   const md = value => String(value ?? "").replace(/[\\`*_[\]<>#|]/g,"\\$&").replace(/[\r\n]+/g," ");
   const params = state.appliedDashboardParams || {};
   const filters = Object.entries(params).filter(([,value])=>value!=="").map(([key,value])=>`${key}: ${key==="api_key"?maskApiKey(value):value}`).join(" · ");
-  const lines = [`# LogArk · ${t("reportView.title")}`,"",`${timeFormat(payload.window.from_ts)} — ${timeFormat(payload.window.to_ts)}`,md(filters),"",`> ${t("patterns.rule")}`,"",`## ${t("report.title")}`,"",md(reportConclusion(payload)),"",
+  const lines = [`# TraceNote · ${t("reportView.title")}`,"",`${timeFormat(payload.window.from_ts)} — ${timeFormat(payload.window.to_ts)}`,md(filters),"",`> ${t("patterns.rule")}`,"",`## ${t("report.title")}`,"",md(reportConclusion(payload)),"",
     `- ${t("metrics.auditTotal")}: ${numberFormat(payload.summary.total_requests)}`,
     `- ${t("metrics.non200Count")}: ${numberFormat(payload.summary.error_requests)}`,
     `- ${t("metrics.non200Rate")}: ${rateFormat(payload.summary.error_rate,2)}`,"",
@@ -660,7 +660,7 @@ function exportReport() {
     lines.push(`### ${md(failureSignature(pattern))}`,"",`${t("patterns.occurrences")}: ${numberFormat(pattern.count)} · ${t("patterns.failureShare")}: ${rateFormat(pattern.impact_share_pct)} · ${t("patterns.maxLatency")}: ${durationFormat(pattern.max_duration_ms)}`,md(`request_id: ${pattern.representative?.request_id || "—"} · ID: ${pattern.representative?.id || "—"}`),`${timeFormat(pattern.first_seen_ts)} — ${timeFormat(pattern.last_seen_ts)}`,"");
   }
   const url=URL.createObjectURL(new Blob([lines.join("\n")],{type:"text/markdown;charset=utf-8"}));
-  const anchor=document.createElement("a"); anchor.href=url; anchor.download=`logark-report-${new Date(payload.window.to_ts).toISOString().slice(0,10)}.md`;
+  const anchor=document.createElement("a"); anchor.href=url; anchor.download=`tracenote-report-${new Date(payload.window.to_ts).toISOString().slice(0,10)}.md`;
   document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
 
