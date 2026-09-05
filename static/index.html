@@ -4,24 +4,32 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <meta name="theme-color" content="#b42318">
+  <meta name="theme-color" content="#18204f">
   <meta name="description" content="LogArk 非 200 拦截请求解释性分析报告" data-i18n-content="meta.description">
   <title>LogArk · 非 200 拦截请求分析报告</title>
   <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.min.css" rel="stylesheet">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body class="app-body">
-  <nav class="navbar navbar-expand-lg bg-white border-bottom">
-    <div class="container-fluid app-shell py-2">
+  <a class="skip-link" href="#reportOverview" data-i18n="reference.overview">汇总与结论</a>
+  <div class="report-notice"><div class="app-shell notice-inner"><strong data-i18n="reference.notice">审计报告</strong><span data-i18n="patterns.rule">统计口径：status_code != 200；分组仅描述重复特征，不推断根因。</span></div></div>
+  <nav class="app-navbar" aria-label="主导航" data-i18n-aria-label="reportView.navAria">
+    <div class="app-shell nav-inner">
       <a class="navbar-brand d-flex align-items-center gap-2" href="/" aria-label="LogArk 首页" data-i18n-aria-label="nav.homeAria">
-        <img class="brand-mark" src="/assets/favicon.svg" width="32" height="32" alt="">
-        <span class="fw-semibold">LogArk</span>
+        <img class="brand-mark" src="/assets/favicon.svg" width="28" height="28" alt="">
+        <span class="brand-lockup"><span class="brand-name">LogArk</span><span class="brand-subtitle" data-i18n="reference.masthead">请求质量与失败分析</span></span>
       </a>
-      <div class="d-flex align-items-center gap-2 ms-auto">
-        <span class="badge rounded-pill bg-body-secondary text-body d-none d-md-inline-flex" data-i18n="nav.audit">非 200 拦截报告</span>
-        <span id="lastUpdated" class="navbar-text text-body-secondary small text-nowrap d-none d-sm-inline" aria-live="polite" data-i18n="status.awaitingRefresh">等待刷新</span>
+      <div class="report-nav">
+        <a href="#reportOverview" class="active" aria-current="location" data-i18n="reportView.navReport">报告总览</a>
+        <a href="#typicalFailures" data-i18n="reportView.navFailures">典型失败样本</a>
+        <a href="#requestDetails" data-i18n="reportView.navDetails">请求明细</a>
+      </div>
+      <div class="nav-utilities">
         <label class="visually-hidden" for="localeSelect">语言 / Language</label>
         <select id="localeSelect" class="form-select form-select-sm locale-select" aria-label="语言 / Language">
           <option value="zh-CN">中文</option>
@@ -31,136 +39,192 @@
     </div>
   </nav>
 
-  <main class="container-fluid app-shell py-4">
-    <div class="d-flex flex-column flex-lg-row align-items-lg-end justify-content-between gap-3 mb-4">
-      <div>
-        <h1 class="paper-title h2 fw-semibold text-body-emphasis mb-2" data-i18n="page.title">非 200 拦截请求分析报告</h1>
-        <p class="text-body-secondary mb-0" data-i18n="page.subtitle">以非 200 请求为主体，从状态码、接口、Method 与时间趋势解释拦截数据；全部请求仅用于计算错误率。</p>
+  <nav class="report-breadcrumb" aria-label="Breadcrumb"><div class="app-shell"><a href="#reportOverview" data-i18n="reference.home">报告首页</a><span aria-hidden="true">›</span><span data-i18n="reference.breadcrumb">汇总分析</span></div></nav>
+  <main class="app-shell report-page">
+    <header class="report-hero" id="reportOverview">
+      <div class="hero-copy">
+        <div class="report-eyebrow"><span class="eyebrow-line" aria-hidden="true"></span><span data-i18n="reportView.eyebrow">审计分析</span></div>
+        <h1 id="pageTitle" class="paper-title" data-i18n="reportView.title">请求质量报告</h1>
+        <p class="hero-description" data-i18n="reportView.subtitle">请求汇总、失败分布与典型样本。</p>
       </div>
-      <div class="d-flex align-items-center gap-2 flex-wrap">
-        <span id="windowBadge" class="badge rounded-pill bg-white text-body-secondary border">最近 24 小时</span>
-        <span class="definition-pill d-inline-flex align-items-center gap-2">
-          <span class="definition-dot" aria-hidden="true"></span>
-          <code>status_code != 200</code>
-        </span>
-      </div>
-    </div>
+    </header>
 
+    <div class="report-layout">
+      <div class="report-main">
     <div id="pageAlert" class="alert alert-danger alert-dismissible fade show d-none" role="alert">
       <strong data-i18n="feedback.loadFailedPrefix">加载失败：</strong><span id="pageAlertMessage"></span>
       <button type="button" class="btn-close" aria-label="关闭" data-i18n-aria-label="common.close" data-alert-close></button>
     </div>
 
-    <section class="card mb-4" aria-labelledby="filterTitle">
-      <div class="card-header bg-white border-0 px-4 pt-4 pb-0">
-        <div class="d-flex flex-column flex-md-row justify-content-between gap-2">
-          <div>
-            <h2 id="filterTitle" class="paper-heading h5 mb-1" data-i18n="filters.title">分析范围</h2>
-            <p class="small text-body-secondary mb-0" data-i18n="filters.help">筛选条件同时作用于错误率、趋势和排行榜</p>
+    <form id="dashboardFilter" class="report-controls">
+      <div class="period-control">
+        <label for="hours" class="control-label" data-i18n="reportView.period">报告周期</label>
+        <select id="hours" class="form-select form-select-sm">
+          <option value="1" data-i18n="time.lastHours" data-i18n-count="1">最近 1 小时</option>
+          <option value="6" data-i18n="time.lastHours" data-i18n-count="6">最近 6 小时</option>
+          <option value="24" data-i18n="time.lastHours" data-i18n-count="24" selected>最近 24 小时</option>
+          <option value="72" data-i18n="time.lastHours" data-i18n-count="72">最近 72 小时</option>
+          <option value="168" data-i18n="time.lastDays" data-i18n-count="7">最近 7 天</option>
+        </select>
+        <button id="refreshButton" type="submit" class="btn btn-primary btn-sm">
+          <span id="refreshSpinner" class="spinner-border spinner-border-sm d-none" aria-hidden="true"></span>
+          <i id="refreshIcon" class="bi bi-arrow-clockwise app-icon" aria-hidden="true"></i>
+          <span data-i18n="actions.refresh">刷新</span>
+        </button>
+      </div>
+      <span id="reportFreshness" class="report-freshness"></span>
+      <details id="advancedFilters" class="advanced-filters">
+        <summary><i class="bi bi-sliders2 app-icon" aria-hidden="true"></i><span data-i18n="reportView.advancedFilters">筛选范围</span></summary>
+        <div class="advanced-filter-content">
+          <div class="advanced-filter-heading">
+            <div>
+              <h2 id="filterTitle" class="h6 mb-1" data-i18n="filters.title">分析范围</h2>
+              <p class="small text-body-secondary mb-0" data-i18n="reportView.scopeHelp">周期、接口与业务筛选条件应用于整份报告。</p>
+            </div>
+            <button id="resetDashboardButton" type="button" class="btn btn-sm btn-link text-decoration-none" data-i18n="actions.resetFilters">重置筛选</button>
           </div>
-          <button id="resetDashboardButton" type="button" class="btn btn-sm btn-link text-decoration-none align-self-start" data-i18n="actions.resetFilters">重置筛选</button>
+          <div class="row g-3">
+            <div class="col-12 col-sm-6 col-lg-4">
+              <label for="path" class="form-label" data-i18n="fields.pathPrefix">Path 前缀</label>
+              <input id="path" class="form-control form-control-sm" placeholder="例如 /api/public" data-i18n-placeholder="placeholders.path">
+            </div>
+            <div class="col-12 col-sm-6 col-lg-2">
+              <label for="method" class="form-label" data-i18n="fields.method">Method</label>
+              <input id="method" class="form-control form-control-sm text-uppercase" placeholder="例如 POST" data-i18n-placeholder="placeholders.method" maxlength="16">
+            </div>
+            <div class="col-12 col-sm-6 col-lg-3">
+              <label for="taskType" class="form-label" data-i18n="fields.taskType">任务类型</label>
+              <input id="taskType" class="form-control form-control-sm" placeholder="精确匹配" data-i18n-placeholder="placeholders.exactMatch">
+            </div>
+            <div class="col-12 col-sm-6 col-lg-3">
+              <label for="apiKey" class="form-label" data-i18n="fields.apiKey">API Key</label>
+              <input id="apiKey" class="form-control form-control-sm" placeholder="精确匹配" data-i18n-placeholder="placeholders.exactMatch" autocomplete="off">
+            </div>
+          </div>
         </div>
-      </div>
-      <div class="card-body p-4">
-        <form id="dashboardFilter" class="row g-3 align-items-end">
-          <div class="col-12 col-sm-6 col-xl-2">
-            <label for="hours" class="form-label" data-i18n="filters.timeWindow">时间窗口</label>
-            <select id="hours" class="form-select">
-              <option value="1" data-i18n="time.lastHours" data-i18n-count="1">最近 1 小时</option>
-              <option value="6" data-i18n="time.lastHours" data-i18n-count="6">最近 6 小时</option>
-              <option value="24" data-i18n="time.lastHours" data-i18n-count="24" selected>最近 24 小时</option>
-              <option value="72" data-i18n="time.lastHours" data-i18n-count="72">最近 72 小时</option>
-              <option value="168" data-i18n="time.lastDays" data-i18n-count="7">最近 7 天</option>
-            </select>
-          </div>
-          <div class="col-12 col-sm-6 col-xl-3">
-            <label for="path" class="form-label" data-i18n="fields.pathPrefix">Path 前缀</label>
-            <input id="path" class="form-control" placeholder="例如 /api/public" data-i18n-placeholder="placeholders.path">
-          </div>
-          <div class="col-12 col-sm-6 col-xl-2">
-            <label for="method" class="form-label" data-i18n="fields.method">Method</label>
-            <input id="method" class="form-control text-uppercase" placeholder="例如 POST" data-i18n-placeholder="placeholders.method" maxlength="16">
-          </div>
-          <div class="col-12 col-sm-6 col-xl-2">
-            <label for="taskType" class="form-label" data-i18n="fields.taskType">任务类型</label>
-            <input id="taskType" class="form-control" placeholder="精确匹配" data-i18n-placeholder="placeholders.exactMatch">
-          </div>
-          <div class="col-12 col-md-8 col-xl-2">
-            <label for="apiKey" class="form-label" data-i18n="fields.apiKey">API Key</label>
-            <input id="apiKey" class="form-control" placeholder="精确匹配" data-i18n-placeholder="placeholders.exactMatch" autocomplete="off">
-          </div>
-          <div class="col-12 col-md-4 col-xl-1 d-grid">
-            <button id="refreshButton" type="submit" class="btn btn-primary">
-              <span id="refreshSpinner" class="spinner-border spinner-border-sm me-1 d-none" aria-hidden="true"></span>
-              <i id="refreshIcon" class="bi bi-arrow-clockwise app-icon me-1" aria-hidden="true"></i>
-              <span data-i18n="actions.refresh">刷新</span>
-            </button>
-          </div>
-        </form>
-      </div>
-    </section>
+      </details>
+    </form>
 
-    <section id="metricCards" class="row g-3 g-xl-4 mb-4" aria-label="错误概览" data-i18n-aria-label="overview.ariaLabel" aria-live="polite">
-      <div class="col-12 text-center py-5 text-body-secondary">
-        <div class="spinner-border text-primary mb-3" role="status"><span class="visually-hidden" data-i18n="states.loading">正在加载</span></div>
-        <div data-i18n="states.calculatingErrorRate">正在计算错误率…</div>
+    <section class="overview-section" aria-label="错误概览" data-i18n-aria-label="overview.ariaLabel">
+      <div class="section-kicker"><span class="section-number">01</span><span data-i18n="reportView.overviewLabel">请求概览</span><span class="definition-inline"><span class="definition-dot" aria-hidden="true"></span><code>status_code != 200</code></span></div>
+      <div id="metricCards" class="report-metrics" aria-live="polite">
+        <div class="metrics-loading text-body-secondary"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span data-i18n="states.calculatingErrorRate">正在计算错误率…</span></div>
       </div>
-    </section>
-
-    <section class="card report-card mb-4" aria-labelledby="reportTitle">
-      <div class="card-header bg-white px-4 py-3 d-flex flex-column flex-md-row justify-content-between gap-2">
-        <div>
-          <h2 id="reportTitle" class="section-title paper-heading h5 mb-1"><i class="bi bi-file-earmark-text app-icon" aria-hidden="true"></i><span data-i18n="report.title">报告摘要</span></h2>
-          <p class="small text-body-secondary mb-0" data-i18n="report.help">综合当前筛选窗口内的非 200 数据，结论会随筛选自动更新。</p>
+      <section class="report-conclusion" aria-labelledby="reportTitle">
+        <div class="conclusion-heading">
+          <span class="conclusion-mark" aria-hidden="true"><i class="bi bi-file-earmark-text"></i></span>
+          <h2 id="reportTitle" class="h6 mb-0" data-i18n="reportView.findingsLabel">统计结论</h2>
         </div>
-        <span class="badge rounded-pill bg-body-secondary text-body align-self-start" data-i18n="report.generated">数据驱动结论</span>
-      </div>
-      <ol id="reportFindings" class="list-group list-group-numbered list-group-flush report-findings" aria-live="polite"></ol>
-      <div class="card-footer bg-white px-4 py-3">
-        <span class="figure-note" data-i18n="report.dimensions">综合维度：总体 · 状态码 · 接口 · Method · 时间 · API Key · 任务类型</span>
-      </div>
+        <ol id="reportFindings" class="report-findings list-group list-group-numbered list-group-flush" aria-live="polite"></ol>
+      </section>
     </section>
 
-    <section class="card mb-4" aria-labelledby="hourlyTitle">
-      <div class="card-header bg-white px-4 py-3 d-flex flex-column flex-sm-row justify-content-between gap-2">
+      </div>
+      <aside class="report-sidebar" aria-labelledby="reportContentsTitle">
+        <h2 id="reportContentsTitle" class="sidebar-title" data-i18n="reference.contents">报告目录</h2>
+        <nav class="report-side-nav" aria-labelledby="reportContentsTitle">
+          <a href="#reportOverview" class="active" aria-current="location" data-i18n="reference.overview">汇总与结论</a>
+          <a href="#reportTrends" data-i18n="reference.trend">失败趋势</a>
+          <a href="#typicalFailures" data-i18n="reference.failures">典型失败样本</a>
+          <a href="#statisticalViews" data-i18n="reference.statistics">多维统计分析</a>
+          <a href="#requestDetails" data-i18n="reference.details">请求明细</a>
+        </nav>
+        <section class="sidebar-section" aria-labelledby="scopeTitle">
+          <h2 id="scopeTitle" class="sidebar-title" data-i18n="reference.scope">当前统计范围</h2>
+          <span id="windowBadge" class="report-period">最近 24 小时</span>
+          <span id="lastUpdated" class="report-updated" aria-live="polite" data-i18n="status.awaitingRefresh">等待刷新</span>
+          <dl class="sidebar-facts"><div><dt data-i18n="reference.source">数据来源</dt><dd><code>api_audit_log</code></dd></div></dl>
+        </section>
+        <section class="sidebar-section" aria-labelledby="methodologyTitle">
+          <h2 id="methodologyTitle" class="sidebar-title" data-i18n="reference.methodology">统计说明</h2>
+          <p data-i18n="patterns.sampleStrategy">代表请求：本类中 ID 最大的一条入库记录。</p>
+          <a href="#reportDownload" class="sidebar-export-link"><span data-i18n="reportView.export">导出报告</span><span aria-hidden="true"> →</span></a>
+        </section>
+      </aside>
+    </div>
+
+    <div id="reportTrends" class="report-chart-grid">
+      <section class="report-panel volume-panel" aria-labelledby="hourlyTitle">
+      <div class="panel-heading px-4 py-3 d-flex flex-column flex-sm-row justify-content-between gap-2">
         <div>
-          <h2 id="hourlyTitle" class="section-title paper-heading h5 mb-1"><i class="bi bi-graph-up-arrow app-icon" aria-hidden="true"></i><span data-i18n="hourly.title">每小时非 200 请求量</span></h2>
-          <p class="small text-body-secondary mb-0" data-i18n="hourly.help">按自然小时汇总拦截数量，用于识别突增、峰值和持续异常</p>
+          <h2 id="hourlyTitle" class="section-title h5 mb-1"><i class="bi bi-graph-up-arrow app-icon" aria-hidden="true"></i><span class="figure-index" aria-hidden="true">I.</span> <span data-i18n="hourly.title">每小时失败趋势</span></h2>
+          <p class="small text-body-secondary mb-0" data-i18n="hourly.help">按自然小时汇总非 200 请求数</p>
         </div>
         <span id="hourlyPeakBadge" class="badge rounded-pill bg-body-secondary text-body align-self-start">—</span>
       </div>
-      <div id="hourlyVolumeChart" class="card-body p-3 p-md-4" aria-live="polite"></div>
+      <div id="hourlyVolumeChart" class="panel-body" aria-live="polite"></div>
+    </section>
+      <section class="report-panel status-panel" aria-labelledby="statusTitle">
+          <div class="panel-heading px-4 py-3">
+            <h2 id="statusTitle" class="section-title h5 mb-1"><i class="bi bi-bar-chart-line app-icon" aria-hidden="true"></i><span data-i18n="statusDistribution.title">非 200 状态码分布</span></h2>
+            <p class="small text-body-secondary mb-0" data-i18n="statusDistribution.help">各状态码占全部错误的比例，最多显示 8 项</p>
+          </div>
+          <div id="statusDistribution" class="list-group list-group-flush"></div>
+        </section>
+    </div>
+
+    <section id="typicalFailures" class="typical-section" aria-labelledby="typicalFailuresTitle">
+      <div class="section-kicker"><span class="section-number">02</span><span data-i18n="reportView.failuresEyebrow">失败分析</span><span id="patternCount" class="section-count"></span></div>
+      <div class="typical-heading">
+        <div>
+          <h2 id="typicalFailuresTitle" class="paper-heading" data-i18n="reportView.failuresTitle">典型失败样本</h2>
+          <p class="text-body-secondary mb-0" data-i18n="reportView.failuresHelp">按接口、HTTP 方法、状态码与业务错误码分组，每类提供一条代表请求。</p>
+        </div>
+        <div class="pattern-sort">
+          <label for="patternSort" data-i18n="reportView.sortLabel">排序依据</label>
+          <select id="patternSort" class="form-select form-select-sm">
+            <option value="count" data-i18n="reportView.sortCount">发生次数</option>
+            <option value="severity" data-i18n="reportView.sortSeverity">服务端失败优先</option>
+            <option value="latency" data-i18n="reportView.sortLatency">最大耗时优先</option>
+          </select>
+        </div>
+      </div>
+      <div id="failureCoverage" class="failure-coverage" aria-live="polite"></div>
+      <div id="failurePatterns" class="failure-patterns" aria-live="polite">
+        <div class="empty-state"><span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span><span data-i18n="states.loading">正在加载</span></div>
+      </div>
     </section>
 
-    <div class="row g-4 mb-4">
-      <div class="col-12 col-xl-8">
-        <section class="card h-100" aria-labelledby="trendTitle">
-          <div class="card-header bg-white px-4 py-3 d-flex flex-column flex-sm-row justify-content-between gap-2">
+    <section id="statisticalViews" class="scientific-section" aria-labelledby="statisticalTitle">
+      <div class="scientific-section-heading"><h2 id="statisticalTitle" data-i18n="figures.sectionTitle">多维统计分析</h2><p data-i18n="figures.sectionHelp">按接口规模、失败集中度与 HTTP 方法比较当前窗口。</p></div>
+      <div class="scientific-grid-layout">
+        <section class="scientific-panel" aria-labelledby="scatterTitle"><h3 id="scatterTitle"><span class="figure-index" aria-hidden="true">II.</span> <span data-i18n="figures.scatterTitle">接口规模与失败率</span></h3><div id="endpointScatter"></div></section>
+        <section class="scientific-panel" aria-labelledby="paretoTitle"><h3 id="paretoTitle"><span class="figure-index" aria-hidden="true">III.</span> <span data-i18n="figures.paretoTitle">接口失败集中度</span></h3><div id="failurePareto"></div></section>
+        <section class="scientific-panel scientific-panel-wide" aria-labelledby="methodCompositionTitle"><h3 id="methodCompositionTitle"><span class="figure-index" aria-hidden="true">IV.</span> <span data-i18n="figures.methodTitle">HTTP 方法构成</span></h3><div id="methodComposition"></div></section>
+      </div>
+    </section>
+
+    <section id="requestDetails" class="supporting-section" aria-label="进一步分析">
+      <div class="section-kicker"><span class="section-number">03</span><span data-i18n="reportView.navDetails">请求明细</span></div>
+      <details id="dimensionsDisclosure" class="report-disclosure">
+        <summary>
+          <span class="disclosure-icon"><i class="bi bi-bar-chart-line" aria-hidden="true"></i></span>
+          <span class="disclosure-copy"><strong data-i18n="reportView.dimensionsTitle">接口与业务维度</strong><span data-i18n="reportView.dimensionsHelp">接口排行、成功占比、时间明细与其他分布</span></span>
+          <i class="bi bi-plus-lg disclosure-toggle" aria-hidden="true"></i>
+        </summary>
+        <div class="disclosure-body">
+          <div class="row g-4 mb-4">
+            <div class="col-12 col-xl-8"><section class="report-panel " aria-labelledby="trendTitle">
+          <div class="panel-heading px-4 py-3 d-flex flex-column flex-sm-row justify-content-between gap-2">
             <div>
-              <h2 id="trendTitle" class="section-title paper-heading h5 mb-1"><i class="bi bi-activity app-icon" aria-hidden="true"></i><span data-i18n="trend.title">错误率趋势</span></h2>
+              <h2 id="trendTitle" class="section-title h5 mb-1"><i class="bi bi-activity app-icon" aria-hidden="true"></i><span data-i18n="trend.title">错误率趋势</span></h2>
               <p class="small text-body-secondary mb-0" data-i18n="trend.help">每个时间段的非 200 数量 / 总请求数</p>
             </div>
             <span id="bucketBadge" class="badge rounded-pill bg-body-secondary text-body align-self-start">—</span>
           </div>
           <div id="errorTrend" class="card-body p-0"></div>
-        </section>
-      </div>
-      <div class="col-12 col-xl-4">
-        <section class="card h-100" aria-labelledby="shareTitle">
-          <div class="card-header bg-white px-4 py-3">
-            <h2 id="shareTitle" class="section-title paper-heading h5 mb-1"><i class="bi bi-pie-chart app-icon" aria-hidden="true"></i><span data-i18n="share.title">拦截占比</span></h2>
+        </section></div>
+            <div class="col-12 col-xl-4"><section class="report-panel " aria-labelledby="shareTitle">
+          <div class="panel-heading px-4 py-3">
+            <h2 id="shareTitle" class="section-title h5 mb-1"><i class="bi bi-pie-chart app-icon" aria-hidden="true"></i><span data-i18n="share.title">非 200 占比</span></h2>
             <p class="small text-body-secondary mb-0" data-i18n="share.help">非 200 与 200 在全部审计请求中的构成</p>
           </div>
           <div id="errorShareFigure" class="card-body p-4"></div>
-        </section>
-      </div>
-    </div>
-
-    <div class="row g-4 mb-4">
-      <div class="col-12 col-xl-8">
-        <section class="card h-100" aria-labelledby="pathsTitle">
-          <div class="card-header bg-white px-4 py-3">
-            <h2 id="pathsTitle" class="paper-heading h5 mb-1" data-i18n="topPaths.title">错误量最高的接口</h2>
+        </section></div>
+          </div>
+          <section class="report-panel " aria-labelledby="pathsTitle">
+          <div class="panel-heading px-4 py-3">
+            <h2 id="pathsTitle" class="h5 mb-1" data-i18n="topPaths.title">错误量最高的接口</h2>
             <p class="small text-body-secondary mb-0" data-i18n="topPaths.help">按非 200 数量排序，同时展示该接口自身错误率</p>
           </div>
           <div class="table-responsive">
@@ -177,50 +241,39 @@
             </table>
           </div>
         </section>
-      </div>
-      <div class="col-12 col-xl-4">
-        <section class="card h-100" aria-labelledby="statusTitle">
-          <div class="card-header bg-white px-4 py-3">
-            <h2 id="statusTitle" class="section-title paper-heading h5 mb-1"><i class="bi bi-bar-chart-line app-icon" aria-hidden="true"></i><span data-i18n="statusDistribution.title">非 200 状态码分布</span></h2>
-            <p class="small text-body-secondary mb-0" data-i18n="statusDistribution.help">各状态码占全部错误的比例，最多显示 8 项</p>
-          </div>
-          <div id="statusDistribution" class="list-group list-group-flush"></div>
-        </section>
-      </div>
-    </div>
-
-    <div class="row g-4 mb-4" aria-label="其他错误维度" data-i18n-aria-label="dimensions.aria">
-      <div class="col-12 col-lg-4">
-        <section class="card h-100" aria-labelledby="methodsTitle">
-          <div class="card-header bg-white px-4 py-3">
-            <h2 id="methodsTitle" class="paper-heading h5 mb-1" data-i18n="methods.title">Method 构成</h2>
+          <div class="row g-4 mt-0" aria-label="其他错误维度" data-i18n-aria-label="dimensions.aria">
+            <div class="col-12 col-lg-4"><section class="report-panel " aria-labelledby="methodsTitle">
+          <div class="panel-heading px-4 py-3">
+            <h2 id="methodsTitle" class="h5 mb-1" data-i18n="methods.title">Method 构成</h2>
             <p class="small text-body-secondary mb-0" data-i18n="methods.help">错误贡献占比 / 该 Method 自身错误率</p>
           </div>
           <div id="errorMethodDistribution" class="list-group list-group-flush"></div>
-        </section>
-      </div>
-      <div class="col-12 col-lg-4">
-        <section class="card h-100" aria-labelledby="keysTitle">
-          <div class="card-header bg-white px-4 py-3">
-            <h2 id="keysTitle" class="paper-heading h5 mb-0" data-i18n="ranking.apiKeys">API Key 错误排行</h2>
+        </section></div>
+            <div class="col-12 col-lg-4"><section class="report-panel " aria-labelledby="keysTitle">
+          <div class="panel-heading px-4 py-3">
+            <h2 id="keysTitle" class="h5 mb-0" data-i18n="ranking.apiKeys">API Key 错误排行</h2>
           </div>
           <div id="topErrorKeys" class="list-group list-group-flush"></div>
-        </section>
-      </div>
-      <div class="col-12 col-lg-4">
-        <section class="card h-100" aria-labelledby="tasksTitle">
-          <div class="card-header bg-white px-4 py-3">
-            <h2 id="tasksTitle" class="paper-heading h5 mb-0" data-i18n="ranking.taskTypes">任务类型错误排行</h2>
+        </section></div>
+            <div class="col-12 col-lg-4"><section class="report-panel " aria-labelledby="tasksTitle">
+          <div class="panel-heading px-4 py-3">
+            <h2 id="tasksTitle" class="h5 mb-0" data-i18n="ranking.taskTypes">任务类型错误排行</h2>
           </div>
           <div id="topErrorTasks" class="list-group list-group-flush"></div>
-        </section>
-      </div>
-    </div>
-
-    <section class="card mb-4" aria-labelledby="latestTitle">
-      <div class="card-header bg-white px-4 py-3 d-flex flex-column flex-md-row justify-content-between gap-2">
+        </section></div>
+          </div>
+        </div>
+      </details>
+      <details id="latestDisclosure" class="report-disclosure">
+        <summary>
+          <span class="disclosure-icon"><i class="bi bi-clock-history" aria-hidden="true"></i></span>
+          <span class="disclosure-copy"><strong data-i18n="latest.title">最新非 200 请求</strong><span data-i18n="reportView.latestHelp">按时间查看最近的失败请求</span></span>
+          <i class="bi bi-plus-lg disclosure-toggle" aria-hidden="true"></i>
+        </summary>
+        <div class="disclosure-body"><section class="report-panel " aria-labelledby="latestTitle">
+      <div class="panel-heading px-4 py-3 d-flex flex-column flex-md-row justify-content-between gap-2">
         <div>
-          <h2 id="latestTitle" class="section-title paper-heading h5 mb-1"><i class="bi bi-clock-history app-icon" aria-hidden="true"></i><span data-i18n="latest.title">最新非 200 请求</span></h2>
+          <h2 id="latestTitle" class="section-title h5 mb-1"><i class="bi bi-clock-history app-icon" aria-hidden="true"></i><span data-i18n="latest.title">最新非 200 请求</span></h2>
           <p class="small text-body-secondary mb-0" data-i18n="latest.help">来自当前分析窗口，点击任一行查看完整审计内容</p>
         </div>
         <span class="badge rounded-pill text-bg-danger align-self-start" data-i18n="latest.limit" data-i18n-count="8">最新 8 条</span>
@@ -240,13 +293,19 @@
           <tbody id="latestErrors"></tbody>
         </table>
       </div>
-    </section>
-
-    <section class="card" aria-labelledby="recordsTitle">
-      <div class="card-header bg-white px-4 pt-4 pb-3">
+    </section></div>
+      </details>
+      <details id="recordsDisclosure" class="report-disclosure">
+        <summary>
+          <span class="disclosure-icon"><i class="bi bi-list-ul" aria-hidden="true"></i></span>
+          <span class="disclosure-copy"><strong data-i18n="records.title">拦截明细</strong><span data-i18n="reportView.recordsHelp">按请求标识或状态码查询明细</span></span>
+          <i class="bi bi-plus-lg disclosure-toggle" aria-hidden="true"></i>
+        </summary>
+        <div class="disclosure-body"><section class="report-panel " aria-labelledby="recordsTitle">
+      <div class="panel-heading px-4 pt-4 pb-3">
         <div class="d-flex flex-column flex-lg-row justify-content-between gap-3">
           <div>
-            <h2 id="recordsTitle" class="section-title paper-heading h5 mb-1"><i class="bi bi-list-ul app-icon" aria-hidden="true"></i><span data-i18n="records.title">拦截明细</span></h2>
+            <h2 id="recordsTitle" class="section-title h5 mb-1"><i class="bi bi-list-ul app-icon" aria-hidden="true"></i><span data-i18n="records.title">拦截明细</span></h2>
             <p class="small text-body-secondary mb-0" data-i18n="records.help">默认仅显示非 200；精确状态码优先于范围选择</p>
           </div>
           <button id="resetRecordButton" type="button" class="btn btn-sm btn-outline-secondary align-self-start" data-i18n="actions.clearRecordFilters">清空明细条件</button>
@@ -308,12 +367,21 @@
           <span data-i18n="actions.loadMore">加载更多</span>
         </button>
       </div>
+    </section></div>
+      </details>
     </section>
+
+    <section id="reportDownload" class="report-download" aria-labelledby="downloadTitle">
+      <div class="report-document" aria-hidden="true"><div class="document-brand">LogArk</div><div class="document-rule"></div><div class="document-title" data-i18n="reportView.title">请求质量报告</div><div id="exportPreviewRange" class="document-period">—</div><div id="exportPreviewStats" class="document-stats"></div><div class="document-lines"><span></span><span></span><span></span></div><div class="document-footer">api_audit_log</div></div>
+      <div class="download-copy"><h2 id="downloadTitle" data-i18n="reference.downloadTitle">保存本期报告</h2><p data-i18n="reference.downloadHelp">导出当前窗口的汇总、失败特征与样本标识。</p><button id="reportExportButton" type="button" class="btn btn-primary" disabled><i class="bi bi-download app-icon" aria-hidden="true"></i><span data-i18n="reportView.export">导出报告</span></button></div>
+    </section>
+    <div class="back-top"><a href="#reportOverview" data-i18n="reference.backTop">返回顶部</a></div>
+    <footer class="report-footer"><span class="footer-brand">LogArk</span><span data-i18n="reportView.footer">统计范围以当前筛选条件为准。</span><code>status_code != 200</code></footer>
   </main>
 
   <div class="modal fade" id="detailModal" tabindex="-1" aria-labelledby="detailModalTitle" aria-hidden="true" style="display: none;">
     <div class="modal-dialog modal-xl modal-dialog-scrollable">
-      <div class="modal-content border-0 shadow">
+      <div class="modal-content">
         <div class="modal-header">
           <div>
             <div class="d-flex align-items-center gap-2 mb-1">
@@ -330,21 +398,22 @@
           </div>
           <div id="detailError" class="alert alert-danger d-none" role="alert"></div>
           <div id="detailContent">
+            <div id="detailPatternContext" class="d-none"></div>
             <div id="detailMeta" class="row g-3 mb-4"></div>
             <div class="accordion" id="detailAccordion">
               <div class="accordion-item">
                 <h3 class="accordion-header">
-                  <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#requestBodyPanel" aria-expanded="true" aria-controls="requestBodyPanel" data-i18n="detail.requestBody">请求体</button>
+                  <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#requestBodyPanel" aria-expanded="false" aria-controls="requestBodyPanel" data-i18n="detail.requestBody">请求体</button>
                 </h3>
-                <div id="requestBodyPanel" class="accordion-collapse collapse show" data-bs-parent="#detailAccordion">
+                <div id="requestBodyPanel" class="accordion-collapse collapse" data-bs-parent="#detailAccordion">
                   <div class="accordion-body p-0"><pre id="requestBody" class="app-pre mb-0"></pre></div>
                 </div>
               </div>
               <div class="accordion-item">
                 <h3 class="accordion-header">
-                  <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#responseBodyPanel" aria-expanded="false" aria-controls="responseBodyPanel" data-i18n="detail.responseBody">响应体</button>
+                  <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#responseBodyPanel" aria-expanded="true" aria-controls="responseBodyPanel" data-i18n="detail.responseBody">响应体</button>
                 </h3>
-                <div id="responseBodyPanel" class="accordion-collapse collapse" data-bs-parent="#detailAccordion">
+                <div id="responseBodyPanel" class="accordion-collapse collapse show" data-bs-parent="#detailAccordion">
                   <div class="accordion-body p-0"><pre id="responseBody" class="app-pre mb-0"></pre></div>
                 </div>
               </div>
@@ -373,6 +442,8 @@
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous"></script>
   <script src="/assets/i18n.js"></script>
+  <script src="/assets/analytics.js"></script>
+  <script src="/assets/scientific-charts.js"></script>
   <script src="/assets/app.js"></script>
 </body>
 </html>

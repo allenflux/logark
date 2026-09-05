@@ -95,7 +95,43 @@ pub struct DashboardResponse {
     pub top_error_paths: Vec<ErrorRateSlice>,
     pub top_error_api_keys: Vec<ErrorRateSlice>,
     pub top_error_task_types: Vec<ErrorRateSlice>,
+    pub failure_patterns: Vec<FailurePattern>,
+    pub failure_pattern_coverage: FailurePatternCoverage,
     pub latest_errors: Vec<AuditRecordSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FailurePattern {
+    pub method: String,
+    pub path: String,
+    pub status_code: i16,
+    /// SQL space trimming normalizes empty/space-only values and NULL to None.
+    pub error_code: Option<String>,
+    pub count: i64,
+    /// Percentage of all non-200 requests in the filtered report window.
+    pub error_share: f64,
+    pub first_seen_ts: i64,
+    pub last_seen_ts: i64,
+    pub avg_duration_ms: f64,
+    pub max_duration_ms: i32,
+    pub representative: AuditRecordSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FailurePatternCoverage {
+    pub aggregation_scope: &'static str,
+    /// String signature components are grouped bytewise, preserving case.
+    pub group_by: [&'static str; 4],
+    pub total_patterns: i64,
+    pub returned_patterns: usize,
+    pub returned_error_requests: i64,
+    /// Denominator from the same database statement as the returned patterns.
+    pub total_error_requests: i64,
+    pub covered_error_rate: f64,
+    pub truncated: bool,
+    pub limit: usize,
+    /// Highest ID selects the newest ingested example, which can have an older request timestamp.
+    pub representative_strategy: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]

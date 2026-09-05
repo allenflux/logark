@@ -12,7 +12,8 @@ use crate::{
     model::{
         AuditRecordDetail, AuditRecordSummary, BidReport, BidReportWindow, BidStatusCodeStat,
         BidWatchItem, DashboardQuery, DashboardResponse, DashboardSummary, DashboardWindow,
-        ErrorRateSlice, MetricSlice, RecordListQuery, RecordListResponse, TimelinePoint,
+        ErrorRateSlice, FailurePattern, FailurePatternCoverage, MetricSlice, RecordListQuery,
+        RecordListResponse, TimelinePoint,
     },
 };
 
@@ -42,6 +43,23 @@ struct CommonFilter {
     method: Option<String>,
     api_key: Option<String>,
     task_type: Option<String>,
+}
+
+const FAILURE_PATTERN_LIMIT: usize = 12;
+const FAILURE_PATTERN_ERROR_CODE: &str = "NULLIF(TRIM(error_code), '')";
+
+#[derive(sqlx::FromRow)]
+struct FailurePatternRow {
+    normalized_error_code: Option<String>,
+    count: i64,
+    first_seen_ts: i64,
+    last_seen_ts: i64,
+    avg_duration_ms: f64,
+    max_duration_ms: i64,
+    total_patterns: i64,
+    total_error_requests: i64,
+    #[sqlx(flatten)]
+    representative: AuditRecordSummary,
 }
 
 impl AuditAnalyticsService {
@@ -75,6 +93,7 @@ impl AuditAnalyticsService {
             error_method_distribution,
             top_error_api_keys,
             top_error_task_types,
+            (failure_patterns, failure_pattern_coverage),
             latest_errors,
         ) = tokio::try_join!(
             self.fetch_summary(&window, &filter),
@@ -84,6 +103,7 @@ impl AuditAnalyticsService {
             self.fetch_error_method_distribution(&window, &filter),
             self.fetch_top_error_api_keys(&window, &filter),
             self.fetch_top_error_task_types(&window, &filter),
+            self.fetch_failure_patterns(&window, &filter),
             self.fetch_latest_errors(&window, &filter),
         )?;
 
@@ -101,6 +121,8 @@ impl AuditAnalyticsService {
             top_error_paths,
             top_error_api_keys,
             top_error_task_types,
+            failure_patterns,
+            failure_pattern_coverage,
             latest_errors,
         };
 
@@ -632,6 +654,41 @@ impl AuditAnalyticsService {
         Ok(rows)
     }
 
+    async fn fetch_failure_patterns(
+        &self,
+        window: &AnalyticsWindow,
+        filter: &CommonFilter,
+    ) -> anyhow::Result<(Vec<FailurePattern>, FailurePatternCoverage)> {
+        let rows = failure_patterns_query(window, filter)
+            .build_query_as::<FailurePatternRow>()
+            .fetch_all(&self.pool)
+            .await?;
+        // The scalar totals share the statement snapshot with the selected
+        // groups and examples. No returned groups means an empty error window.
+        let (total_patterns, total_error_requests) = rows
+            .first()
+            .map(|row| (row.total_patterns, row.total_error_requests))
+            .unwrap_or((0, 0));
+        let patterns: Vec<_> = rows
+            .into_iter()
+            .map(|row| FailurePattern {
+                method: row.representative.method.clone(),
+                path: row.representative.path.clone(),
+                status_code: row.representative.status_code,
+                error_code: row.normalized_error_code,
+                count: row.count,
+                error_share: percentage(row.count, total_error_requests),
+                first_seen_ts: row.first_seen_ts,
+                last_seen_ts: row.last_seen_ts,
+                avg_duration_ms: row.avg_duration_ms,
+                max_duration_ms: i32::try_from(row.max_duration_ms).unwrap_or(i32::MAX),
+                representative: row.representative,
+            })
+            .collect();
+        let coverage = failure_pattern_coverage(&patterns, total_patterns, total_error_requests);
+        Ok((patterns, coverage))
+    }
+
     async fn fetch_top_error_dimension(
         &self,
         window: &AnalyticsWindow,
@@ -720,6 +777,97 @@ impl AuditAnalyticsService {
             .fetch_all(&self.pool)
             .await
             .map_err(Into::into)
+    }
+}
+
+fn failure_patterns_query<'a>(
+    window: &AnalyticsWindow,
+    filter: &'a CommonFilter,
+) -> QueryBuilder<'a, MySql> {
+    // Aggregate the entire filtered window before applying the display limit.
+    // Joining MAX(id) retrieves one newest-ingested example per pattern without
+    // fetching request/response bodies, relying on GROUP_CONCAT, or using N+1 queries.
+    let mut qb = QueryBuilder::new(
+        "SELECT sample.id, sample.request_id, sample.request_ts, sample.duration_ms, \
+         sample.method, sample.path, sample.status_code, sample.client_ip, sample.api_key, \
+         sample.task_id, sample.task_type, sample.error_code, \
+         patterns.normalized_error_code, patterns.count, patterns.first_seen_ts, \
+         patterns.last_seen_ts, patterns.avg_duration_ms, patterns.max_duration_ms, \
+         totals.total_patterns, totals.total_error_requests \
+         FROM (SELECT MIN(method) AS method, MIN(path) AS path, status_code, MIN(",
+    );
+    qb.push(FAILURE_PATTERN_ERROR_CODE).push(
+        ") AS normalized_error_code, CAST(COUNT(*) AS SIGNED) AS count, \
+         CAST(MIN(request_ts) AS SIGNED) AS first_seen_ts, \
+         CAST(MAX(request_ts) AS SIGNED) AS last_seen_ts, \
+         CAST(AVG(duration_ms) AS DOUBLE) AS avg_duration_ms, \
+         CAST(MAX(duration_ms) AS SIGNED) AS max_duration_ms, \
+         MAX(id) AS representative_id",
+    );
+    push_failure_pattern_grouping(&mut qb, window, filter);
+    qb.push(
+        " ORDER BY count DESC, last_seen_ts DESC, BINARY MIN(method) ASC, BINARY MIN(path) ASC, \
+         status_code ASC, BINARY MIN(NULLIF(TRIM(error_code), '')) ASC LIMIT ",
+    )
+    .push_bind(FAILURE_PATTERN_LIMIT as i64)
+    .push(") AS patterns CROSS JOIN (");
+    push_failure_pattern_totals(&mut qb, window, filter);
+    qb.push(
+        ") AS totals INNER JOIN api_audit_log AS sample ON sample.id = patterns.representative_id \
+         ORDER BY patterns.count DESC, patterns.last_seen_ts DESC, BINARY patterns.method ASC, \
+         BINARY patterns.path ASC, patterns.status_code ASC, BINARY patterns.normalized_error_code ASC",
+    );
+    qb
+}
+
+fn push_failure_pattern_totals<'a>(
+    qb: &mut QueryBuilder<'a, MySql>,
+    window: &AnalyticsWindow,
+    filter: &'a CommonFilter,
+) {
+    qb.push(
+        "SELECT CAST(COUNT(*) AS SIGNED) AS total_patterns, \
+         CAST(COALESCE(SUM(patterns.count), 0) AS SIGNED) AS total_error_requests \
+         FROM (SELECT COUNT(*) AS count",
+    );
+    push_failure_pattern_grouping(qb, window, filter);
+    qb.push(") AS patterns");
+}
+
+fn push_failure_pattern_grouping<'a>(
+    qb: &mut QueryBuilder<'a, MySql>,
+    window: &AnalyticsWindow,
+    filter: &'a CommonFilter,
+) {
+    qb.push(" FROM api_audit_log WHERE request_ts BETWEEN ")
+        .push_bind(window.from_ts)
+        .push(" AND ")
+        .push_bind(window.to_ts)
+        .push(" AND status_code <> 200");
+    push_common_filters(qb, filter);
+    // HTTP paths and application error codes are case-sensitive signatures even
+    // when the source table uses the default case-insensitive MySQL collation.
+    qb.push(" GROUP BY BINARY method, BINARY path, status_code, BINARY ")
+        .push(FAILURE_PATTERN_ERROR_CODE);
+}
+
+fn failure_pattern_coverage(
+    patterns: &[FailurePattern],
+    total_patterns: i64,
+    total_error_requests: i64,
+) -> FailurePatternCoverage {
+    let returned_error_requests = patterns.iter().map(|pattern| pattern.count).sum();
+    FailurePatternCoverage {
+        aggregation_scope: "full_filtered_window",
+        group_by: ["method", "path", "status_code", "error_code"],
+        total_patterns,
+        returned_patterns: patterns.len(),
+        returned_error_requests,
+        total_error_requests,
+        covered_error_rate: percentage(returned_error_requests, total_error_requests),
+        truncated: total_patterns > patterns.len() as i64,
+        limit: FAILURE_PATTERN_LIMIT,
+        representative_strategy: "highest_id_per_pattern",
     }
 }
 
@@ -880,5 +1028,221 @@ mod tests {
         let mut all_statuses = QueryBuilder::<MySql>::new("SELECT 1 WHERE 1 = 1");
         push_record_status_filter(&mut all_statuses, None, false);
         assert!(!all_statuses.sql().contains("status_code"));
+    }
+
+    #[test]
+    fn failure_patterns_aggregate_before_limiting_and_only_fetch_summary_columns() {
+        let window = test_window();
+        let filter = test_filter();
+        let query = failure_patterns_query(&window, &filter);
+        let sql = query.sql();
+        let group_at = sql.find(" GROUP BY ").expect("groups the whole window");
+        let limit_at = sql.find(" LIMIT ").expect("bounds returned groups");
+
+        assert!(group_at < limit_at);
+        assert_eq!(sql.matches(" LIMIT ").count(), 1);
+        assert!(sql.contains("MAX(id) AS representative_id"));
+        assert!(sql.contains("sample.id = patterns.representative_id"));
+        assert!(!sql.contains("request_body"));
+        assert!(!sql.contains("response_body"));
+        assert!(!sql.contains("SELECT *"));
+    }
+
+    #[test]
+    fn failure_pattern_counts_and_examples_use_identical_filters_and_blank_error_groups() {
+        let window = test_window();
+        let filter = test_filter();
+        let patterns = failure_patterns_query(&window, &filter);
+        let mut totals = QueryBuilder::new("");
+        push_failure_pattern_totals(&mut totals, &window, &filter);
+        let expected_grouping = " FROM api_audit_log WHERE request_ts BETWEEN ? AND ? \
+            AND status_code <> 200 AND path LIKE CONCAT(?, '%') AND method = ? \
+            AND api_key = ? AND task_type = ? GROUP BY BINARY method, BINARY path, status_code, \
+            BINARY NULLIF(TRIM(error_code), '')";
+
+        assert!(patterns.sql().contains(expected_grouping));
+        assert_eq!(patterns.sql().matches(expected_grouping).count(), 2);
+        assert!(totals.sql().contains(expected_grouping));
+        assert!(!totals.sql().contains(" LIMIT "));
+        assert!(!patterns.sql().contains("status_code >= 400"));
+        assert!(patterns
+            .sql()
+            .contains("MIN(NULLIF(TRIM(error_code), '')) AS normalized_error_code"));
+    }
+
+    #[test]
+    fn failure_pattern_coverage_reports_full_counts_separately_from_bounded_examples() {
+        let patterns = vec![test_pattern(160), test_pattern(40)];
+        let coverage = failure_pattern_coverage(&patterns, 15, 250);
+
+        assert_eq!(coverage.total_patterns, 15);
+        assert_eq!(coverage.returned_patterns, 2);
+        assert_eq!(coverage.returned_error_requests, 200);
+        assert_eq!(coverage.total_error_requests, 250);
+        assert_eq!(coverage.covered_error_rate, 80.0);
+        assert!(coverage.truncated);
+        assert_eq!(coverage.aggregation_scope, "full_filtered_window");
+        assert_eq!(coverage.representative_strategy, "highest_id_per_pattern");
+    }
+
+    #[test]
+    fn empty_failure_pattern_coverage_is_zero_and_not_truncated() {
+        let coverage = failure_pattern_coverage(&[], 0, 0);
+
+        assert_eq!(coverage.returned_patterns, 0);
+        assert_eq!(coverage.returned_error_requests, 0);
+        assert_eq!(coverage.covered_error_rate, 0.0);
+        assert!(!coverage.truncated);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires LOGARK_TEST_DATABASE_URL pointing to a disposable MariaDB instance"]
+    async fn failure_patterns_execute_against_full_window_fixture() -> anyhow::Result<()> {
+        use sqlx::{Connection, MySqlConnection};
+
+        let url = std::env::var("LOGARK_TEST_DATABASE_URL")?;
+        let mut connection = MySqlConnection::connect(&url).await?;
+        sqlx::query("SET SESSION sql_mode = CONCAT(@@sql_mode, ',ONLY_FULL_GROUP_BY')")
+            .execute(&mut connection)
+            .await?;
+        // A session-scoped temporary table prevents this fixture from modifying
+        // persistent audit data even if the supplied test database has that table.
+        sqlx::query(
+            "CREATE TEMPORARY TABLE api_audit_log (\
+             id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT, request_id VARCHAR(64) NOT NULL DEFAULT 'fixture', \
+             request_ts BIGINT NOT NULL, duration_ms INT NOT NULL, method VARCHAR(16) NOT NULL DEFAULT 'POST', \
+             path VARCHAR(255) NOT NULL DEFAULT '/v1/generate', status_code SMALLINT NOT NULL DEFAULT 500, \
+             client_ip VARCHAR(64) NULL, api_key VARCHAR(255) DEFAULT 'test-key', task_id VARCHAR(64) NULL, \
+             task_type VARCHAR(128) DEFAULT 'generation', error_code VARCHAR(128) NULL\
+             ) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+        )
+        .execute(&mut connection)
+        .await?;
+        for index in 0..18_i32 {
+            sqlx::query("INSERT INTO api_audit_log (request_ts, duration_ms, error_code) VALUES (?, ?, ?)")
+                .bind(if index == 17 { 1_001_i64 } else { 1_000 + i64::from(index) * 10 })
+                .bind(100 + index * 10)
+                .bind([None, Some(""), Some("   ")][index as usize % 3])
+                .execute(&mut connection)
+                .await?;
+        }
+        sqlx::query(
+            "INSERT INTO api_audit_log (request_ts, duration_ms, path, status_code, error_code) VALUES \
+             (2000, 500, '/v1/Generate', 500, NULL), \
+             (2001, 500, '/v1/generate', 500, 'TIMEOUT'), \
+             (2002, 500, '/v1/generate', 500, ' TIMEOUT '), \
+             (2003, 500, '/v1/generate', 500, 'timeout'), \
+             (2004, 500, '/v1/generate', 201, NULL), \
+             (2005, 500, '/v1/generate', 302, NULL), \
+             (2006, 500, '/v1/generate', 200, NULL), \
+             (2006, 100, '/v1/success', 200, NULL), \
+             (999, 500, '/v1/generate', 500, NULL), \
+             (10001, 500, '/v1/generate', 500, NULL), \
+             (2007, 500, '/v2/generate', 500, NULL)",
+        )
+        .execute(&mut connection)
+        .await?;
+        for index in 0..13 {
+            sqlx::query("INSERT INTO api_audit_log (request_ts, duration_ms, path) VALUES (?, 100, ?)")
+                .bind(7_000 + index)
+                .bind(format!("/v1/rare-{index}"))
+                .execute(&mut connection)
+                .await?;
+        }
+        sqlx::query(
+            "INSERT INTO api_audit_log (request_ts, duration_ms, method, api_key, task_type) VALUES \
+             (2008, 100, 'GET', 'test-key', 'generation'), \
+             (2009, 100, 'POST', 'other-key', 'generation'), \
+             (2010, 100, 'POST', 'test-key', 'other-task')",
+        )
+        .execute(&mut connection)
+        .await?;
+
+        let window = test_window();
+        let filter = test_filter();
+        let rows = failure_patterns_query(&window, &filter)
+            .build_query_as::<FailurePatternRow>()
+            .fetch_all(&mut connection)
+            .await?;
+        assert_eq!(rows.len(), FAILURE_PATTERN_LIMIT);
+        assert_eq!(rows[0].total_patterns, 19);
+        assert_eq!(rows[0].total_error_requests, 37);
+        assert_eq!(rows[0].count, 18);
+        assert_eq!(rows[0].normalized_error_code, None);
+        assert_eq!(rows[0].first_seen_ts, 1_000);
+        assert_eq!(rows[0].last_seen_ts, 1_160);
+        assert_eq!(rows[0].avg_duration_ms, 185.0);
+        assert_eq!(rows[0].max_duration_ms, 270);
+        assert_eq!(rows[0].representative.id, 18);
+        assert_eq!(rows[0].representative.request_ts, 1_001);
+        assert_eq!(rows[1].normalized_error_code.as_deref(), Some("TIMEOUT"));
+        assert_eq!(rows[1].count, 2);
+        assert_eq!(rows.iter().map(|row| row.count).sum::<i64>(), 30);
+
+        let earlier_window = AnalyticsWindow { to_ts: 3_000, ..window.clone() };
+        let earlier = failure_patterns_query(&earlier_window, &filter)
+            .build_query_as::<FailurePatternRow>()
+            .fetch_all(&mut connection)
+            .await?;
+        assert_eq!(earlier.len(), 6);
+        assert!(earlier.iter().any(|row| row.representative.path == "/v1/Generate"));
+        assert!(earlier.iter().any(|row| row.normalized_error_code.as_deref() == Some("timeout")));
+        assert!(earlier.iter().any(|row| row.representative.status_code == 201));
+        assert!(earlier.iter().any(|row| row.representative.status_code == 302));
+
+        let empty_filter = CommonFilter { path: Some("/v1/success".into()), ..filter };
+        let empty = failure_patterns_query(&window, &empty_filter)
+            .build_query_as::<FailurePatternRow>()
+            .fetch_all(&mut connection)
+            .await?;
+        assert!(empty.is_empty());
+        Ok(())
+    }
+
+    fn test_window() -> AnalyticsWindow {
+        AnalyticsWindow {
+            from_ts: 1_000,
+            to_ts: 10_000,
+            hours: 1,
+            bucket_ms: 300_000,
+        }
+    }
+
+    fn test_filter() -> CommonFilter {
+        CommonFilter {
+            path: Some("/v1/".into()),
+            method: Some("POST".into()),
+            api_key: Some("test-key".into()),
+            task_type: Some("generation".into()),
+        }
+    }
+
+    fn test_pattern(count: i64) -> FailurePattern {
+        FailurePattern {
+            method: "POST".into(),
+            path: "/v1/generate".into(),
+            status_code: 500,
+            error_code: None,
+            count,
+            error_share: 0.0,
+            first_seen_ts: 1_000,
+            last_seen_ts: 2_000,
+            avg_duration_ms: 100.0,
+            max_duration_ms: 200,
+            representative: AuditRecordSummary {
+                id: 42,
+                request_id: "sample-request".into(),
+                request_ts: 1_500,
+                duration_ms: 80,
+                method: "POST".into(),
+                path: "/v1/generate".into(),
+                status_code: 500,
+                client_ip: None,
+                api_key: None,
+                task_id: None,
+                task_type: None,
+                error_code: None,
+            },
+        }
     }
 }

@@ -11,6 +11,12 @@ const state = {
   refreshToken: 0,
   recordBaseParams: null,
   detailModal: null,
+  dashboardPayload: null,
+  appliedDashboardParams: null,
+  recordsLoaded: false,
+  recordsLoading: false,
+  chartMode: "volume",
+  detailPattern: null,
 };
 
 const el = (id) => document.getElementById(id);
@@ -58,7 +64,7 @@ function buildRecordParams(append) {
   if (!append || !baseParams) {
     const statusCode = validatedStatusCode();
     baseParams = {
-      ...buildDashboardParams(),
+      ...(state.appliedDashboardParams || buildDashboardParams()),
       request_id: el("requestId").value.trim(),
       uuid: el("listUuid").value.trim(),
       task_id: el("taskId").value.trim(),
@@ -426,123 +432,77 @@ function hourTickFormat(timestamp) {
 
 function renderHourlyVolumeChart(points, windowInfo) {
   const host = el("hourlyVolumeChart");
-  const peakBadge = el("hourlyPeakBadge");
   const groups = groupHourlyTimeline(points, windowInfo);
-  if (groups.length === 0) {
-    peakBadge.textContent = "—";
+  if (!groups.length) {
+    el("hourlyPeakBadge").textContent = "—";
     host.innerHTML = emptyState(t("empty.noHourlyVolume"));
     return;
   }
-
-  const peak = groups.reduce(
-    (current, group, index) =>
-      !current || group.errorCount > current.group.errorCount ? { group, index } : current,
-    null,
-  );
-  peakBadge.textContent = t("hourly.peakBadge", { value: numberFormat(peak.group.errorCount) });
-
-  const width = 1120;
-  const height = 320;
-  const margin = { top: 18, right: 24, bottom: 56, left: 76 };
+  const analysis = window.LogArkAnalytics.summarizeTrend(groups.map((group) => ({
+    count: group.count, error_count: group.errorCount,
+  })));
+  const rateMode = state.chartMode === "rate";
+  const values = groups.map((group) => rateMode ? group.errorRate : group.errorCount);
+  const peakIndex = rateMode ? values.indexOf(Math.max(...values)) : Math.max(0, analysis.peak_failure_index);
+  const peak = groups[peakIndex];
+  el("hourlyPeakBadge").textContent = t("hourly.peakBadge", { value: numberFormat(analysis.peak_failures) });
+  const width = Math.max(280, Math.min(880, host.clientWidth - (window.innerWidth < 768 ? 32 : 48)));
+  const height = width < 560 ? 244 : 284;
+  const margin = { top: 24, right: 12, bottom: 44, left: width < 560 ? 40 : 56 };
   const plotWidth = width - margin.left - margin.right;
   const plotHeight = height - margin.top - margin.bottom;
-  const axis = niceCountAxis(peak.group.errorCount);
-  const x = (index) => margin.left + (index / Math.max(groups.length - 1, 1)) * plotWidth;
-  const y = (value) => margin.top + plotHeight - (value / axis.max) * plotHeight;
-  const linePath = groups
-    .map((group, index) => `${index === 0 ? "M" : "L"} ${x(index).toFixed(2)} ${y(group.errorCount).toFixed(2)}`)
-    .join(" ");
-  const areaPath = `${linePath} L ${x(groups.length - 1).toFixed(2)} ${(margin.top + plotHeight).toFixed(2)} L ${x(0).toFixed(2)} ${(margin.top + plotHeight).toFixed(2)} Z`;
-
-  const yGrid = axis.ticks
-    .map((value) => {
-      const position = y(value).toFixed(2);
-      return `
-        <line class="hourly-grid-line" x1="${margin.left}" y1="${position}" x2="${width - margin.right}" y2="${position}"></line>
-        <text class="hourly-axis-label" x="${margin.left - 12}" y="${Number(position) + 4}" text-anchor="end">${escapeHtml(numberFormat(value))}</text>
-      `;
-    })
-    .join("");
-
-  const xGrid = sampledIndices(groups.length)
-    .map((index) => {
-      const position = x(index).toFixed(2);
-      const label = hourTickFormat(groups[index].fromTs);
-      const anchor = index === 0 ? "start" : index === groups.length - 1 ? "end" : "middle";
-      return `
-        <line class="hourly-grid-line hourly-grid-line-x" x1="${position}" y1="${margin.top}" x2="${position}" y2="${margin.top + plotHeight}"></line>
-        <text class="hourly-axis-label" x="${position}" y="${height - 22}" text-anchor="${anchor}">${escapeHtml(label)}</text>
-      `;
-    })
-    .join("");
-
-  const pointMarks = groups
-    .map((group, index) => {
-      const label = t("hourly.pointAria", {
-        time: timelineRangeLabel(group),
-        errors: numberFormat(group.errorCount),
-        total: numberFormat(group.count),
-        rate: rateFormat(group.errorRate, 2),
-      });
-      return `
-        <circle class="hourly-point${index === peak.index ? " hourly-point-peak" : ""}" cx="${x(index).toFixed(2)}" cy="${y(group.errorCount).toFixed(2)}" r="${groups.length > 96 ? 2.2 : 3.2}">
-          <title>${escapeHtml(label)}</title>
-        </circle>
-      `;
-    })
-    .join("");
-
-  const chartLabel = t("hourly.chartAria", {
-    count: groups.length,
-    peak: numberFormat(peak.group.errorCount),
-  });
+  const axis = rateMode ? { max: 100, ticks: [0, 25, 50, 75, 100] } : niceCountAxis(Math.max(...values));
+  const x = (index) => margin.left + index / Math.max(groups.length - 1, 1) * plotWidth;
+  const y = (value) => margin.top + plotHeight - value / axis.max * plotHeight;
+  const line = values.map((value, index) => `${index ? "L" : "M"}${x(index).toFixed(2)},${y(value).toFixed(2)}`).join(" ");
+  const baseline = margin.top + plotHeight;
+  const grid = axis.ticks.map((value) => `<line class="hourly-grid-line" x1="${margin.left}" y1="${y(value)}" x2="${width-margin.right}" y2="${y(value)}"/>
+    <text class="hourly-axis-label" x="${margin.left-12}" y="${y(value)+4}" text-anchor="end">${escapeHtml(rateMode ? `${value}%` : numberFormat(value))}</text>`).join("");
+  const labels = sampledIndices(groups.length, width < 560 ? 3 : 5).map((index) => `<text class="hourly-axis-label" x="${x(index)}" y="${height-16}" text-anchor="${index===0?"start":index===groups.length-1?"end":"middle"}">${escapeHtml(hourTickFormat(groups[index].fromTs))}</text>`).join("");
+  const description = (group) => t("hourly.pointAria", { time: timelineRangeLabel(group), errors: numberFormat(group.errorCount), total: numberFormat(group.count), rate: group.count ? rateFormat(group.errorRate,2) : "—" });
   const caption = t("hourly.caption");
-  const dataRows = groups
-    .map(
-      (group) => `
-        <tr>
-          <td class="ps-3 text-nowrap">${escapeHtml(timelineRangeLabel(group))}</td>
-          <td class="text-end fw-semibold text-danger-emphasis">${numberFormat(group.errorCount)}</td>
-          <td class="text-end">${numberFormat(group.count)}</td>
-          <td class="pe-3 text-end">${rateFormat(group.errorRate, 2)}</td>
-        </tr>
-      `,
-    )
-    .join("");
-  host.innerHTML = `
-    <figure class="hourly-figure mb-0">
-      <div class="hourly-chart-scroll" tabindex="0" aria-label="${escapeHtml(t("hourly.scrollAria"))}">
-        <svg class="hourly-chart" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="hourlyChartTitle hourlyChartDescription">
-          <title id="hourlyChartTitle">${escapeHtml(chartLabel)}</title>
-          <desc id="hourlyChartDescription">${escapeHtml(caption)}</desc>
-          ${yGrid}
-          ${xGrid}
-          <text class="hourly-axis-title" x="18" y="${margin.top + plotHeight / 2}" text-anchor="middle" transform="rotate(-90 18 ${margin.top + plotHeight / 2})">${escapeHtml(t("hourly.axisY"))}</text>
-          <path class="hourly-area" d="${areaPath}"></path>
-          <path class="hourly-line" d="${linePath}"></path>
-          ${pointMarks}
-        </svg>
+  host.innerHTML = `<figure class="hourly-figure mb-0">
+    <div class="d-flex align-items-center justify-content-between gap-3 mb-3 flex-wrap">
+      <div class="chart-mode-switch" role="group" aria-label="${escapeHtml(t("patterns.chartMode"))}">
+        <button type="button" data-chart-mode="volume" aria-pressed="${!rateMode}" class="${!rateMode?"active":""}">${escapeHtml(t("patterns.volume"))}</button>
+        <button type="button" data-chart-mode="rate" aria-pressed="${rateMode}" class="${rateMode?"active":""}">${escapeHtml(t("columns.errorRate"))}</button>
       </div>
-      <figcaption class="figure-note mt-3">${escapeHtml(caption)}</figcaption>
+      <span class="figure-note">${escapeHtml(t("patterns.peakAt", {time: hourTickFormat(peak.fromTs)}))}</span>
+    </div>
+    <div class="hourly-chart-scroll">
+      <svg class="hourly-chart" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="hourlyChartTitle hourlyChartDescription">
+        <title id="hourlyChartTitle">${escapeHtml(rateMode?t("patterns.rateChart"):t("hourly.chartAria", {count:groups.length,peak:numberFormat(analysis.peak_failures)}))}</title>
+        <desc id="hourlyChartDescription">${escapeHtml(caption)}</desc>
+        <text class="scientific-axis-variable" x="${margin.left}" y="14">${rateMode ? "p(t), %" : "n(t)"}</text>
+        <text class="scientific-axis-variable" x="${width - margin.right}" y="${height - 1}" text-anchor="end">t</text>
+        ${grid}${labels}
+        <path class="hourly-area" d="${line} L${x(groups.length-1)},${baseline} L${x(0)},${baseline} Z"/>
+        <path class="hourly-line" d="${line}"/>
+        <line class="chart-cursor" x1="${x(peakIndex)}" x2="${x(peakIndex)}" y1="${margin.top}" y2="${baseline}" stroke="var(--app-muted)" stroke-dasharray="4 4" opacity=".45"/>
+        <circle class="chart-selected hourly-point hourly-point-peak" cx="${x(peakIndex)}" cy="${y(values[peakIndex])}" r="5"/>
+        ${groups.map((group,index)=>`<circle data-chart-point="${index}" cx="${x(index)}" cy="${y(values[index])}" r="10" fill="transparent"><title>${escapeHtml(description(group))}</title></circle>`).join("")}
+      </svg>
+    </div>
+    <div class="chart-tooltip" aria-live="polite">${escapeHtml(description(peak))}</div>
+    <input class="chart-scrubber" type="range" min="0" max="${groups.length-1}" value="${peakIndex}" step="1" aria-label="${escapeHtml(t("patterns.exploreHour"))}" aria-valuetext="${escapeHtml(description(peak))}">
+    <figcaption class="figure-note mt-2">${escapeHtml(caption)}</figcaption>
     </figure>
-    <details class="hourly-data-details mt-3">
-      <summary class="small fw-semibold text-body-secondary">${escapeHtml(t("hourly.dataTable"))}</summary>
-      <div class="table-responsive hourly-data-table-wrap mt-2">
-        <table class="table table-sm align-middle mb-0">
-          <caption class="visually-hidden">${escapeHtml(t("hourly.tableAria"))}</caption>
-          <thead class="table-light">
-            <tr>
-              <th scope="col" class="ps-3">${escapeHtml(t("columns.time"))}</th>
-              <th scope="col" class="text-end">${escapeHtml(t("columns.non200"))}</th>
-              <th scope="col" class="text-end">${escapeHtml(t("columns.totalRequests"))}</th>
-              <th scope="col" class="pe-3 text-end">${escapeHtml(t("columns.errorRate"))}</th>
-            </tr>
-          </thead>
-          <tbody>${dataRows}</tbody>
-        </table>
-      </div>
-    </details>
-  `;
+    <details class="hourly-data-details mt-3"><summary class="small fw-semibold text-body-secondary">${escapeHtml(t("hourly.dataTable"))}</summary>
+      <div class="table-responsive hourly-data-table-wrap mt-2"><table class="table table-sm align-middle mb-0">
+        <thead class="table-light"><tr><th>${escapeHtml(t("columns.time"))}</th><th>${escapeHtml(t("columns.non200"))}</th><th>${escapeHtml(t("columns.totalRequests"))}</th><th>${escapeHtml(t("columns.errorRate"))}</th></tr></thead>
+        <tbody>${groups.map(group=>`<tr><td>${escapeHtml(timelineRangeLabel(group))}</td><td>${numberFormat(group.errorCount)}</td><td>${numberFormat(group.count)}</td><td>${group.count?rateFormat(group.errorRate,2):"—"}</td></tr>`).join("")}</tbody>
+      </table></div></details>`;
+  const scrubber = host.querySelector(".chart-scrubber");
+  function selectPoint(index) {
+    host.querySelector(".chart-tooltip").textContent = description(groups[index]);
+    host.querySelector(".chart-selected").setAttribute("cx", x(index));
+    host.querySelector(".chart-selected").setAttribute("cy", y(values[index]));
+    const cursor = host.querySelector(".chart-cursor");
+    cursor.setAttribute("x1",x(index)); cursor.setAttribute("x2",x(index));
+    scrubber.value=index; scrubber.setAttribute("aria-valuetext",description(groups[index]));
+  }
+  scrubber.addEventListener("input",()=>selectPoint(Number(scrubber.value)));
+  host.querySelectorAll("[data-chart-point]").forEach(point=>point.addEventListener("pointerenter",()=>selectPoint(Number(point.dataset.chartPoint))));
 }
 
 function renderReport(payload) {
@@ -625,6 +585,83 @@ function renderReport(payload) {
       `,
     )
     .join("");
+  host.insertAdjacentHTML("afterbegin", `<li class="report-lead-finding"><div class="metric-label mb-2">${escapeHtml(t("patterns.startHere"))}</div><p class="mb-0">${escapeHtml(reportConclusion(payload))}</p><a href="#typicalFailures" class="small d-inline-block mt-3">${escapeHtml(t("patterns.inspectTypes"))} <span aria-hidden="true">↓</span></a></li>`);
+}
+
+function failureSignature(pattern) {
+  return `${pattern.method} ${pattern.path} · HTTP ${pattern.status_code} · ${pattern.error_code || t("patterns.noCode")}`;
+}
+
+function rankedPatterns(payload) {
+  const ranked = window.LogArkAnalytics.rankFailures(payload.failure_patterns || [], payload.failure_pattern_coverage?.total_error_requests ?? payload.summary.error_requests);
+  const mode = el("patternSort").value;
+  if (mode === "severity") ranked.sort((a,b) => Number(b.status_code >= 500 && b.status_code < 600) - Number(a.status_code >= 500 && a.status_code < 600) || b.count - a.count);
+  if (mode === "latency") ranked.sort((a,b) => b.max_duration_ms - a.max_duration_ms || b.count - a.count);
+  return ranked;
+}
+
+function renderFailurePatterns(payload) {
+  const patterns = rankedPatterns(payload);
+  const coverage = payload.failure_pattern_coverage;
+  const errors = Number(coverage?.total_error_requests ?? payload.summary.error_requests) || 0;
+  el("patternCount").textContent = coverage ? t("patterns.groupCount", {shown:patterns.length,total:numberFormat(coverage.total_patterns)}) : "—";
+  if (!patterns.length) {
+    el("failureCoverage").innerHTML = "";
+    el("failurePatterns").innerHTML = emptyState(t(errors > 0 ? "patterns.unavailable" : "patterns.noFailures"));
+    return;
+  }
+  const concentration = window.LogArkAnalytics.concentration(patterns.map(pattern=>pattern.count),errors);
+  const covered = clampRate(coverage?.covered_error_rate ?? concentration.coverage_share_pct);
+  el("failureCoverage").innerHTML = `<div class="failure-coverage-summary">
+    <div><span class="metric-label">${escapeHtml(t("patterns.coverageLabel"))}</span><strong class="coverage-number">${rateFormat(covered)}</strong></div>
+    <div class="flex-grow-1"><p class="mb-2 small">${escapeHtml(t("patterns.coverage", {count:patterns.length,shown:numberFormat(coverage?.returned_error_requests ?? patterns.reduce((sum,p)=>sum+p.count,0)),total:numberFormat(errors)}))}</p>
+      <div class="coverage-track" role="meter" aria-label="${escapeHtml(t("patterns.coverageLabel"))}" aria-valuenow="${covered}" aria-valuemin="0" aria-valuemax="100"><div class="coverage-value" style="width:${covered}%"></div></div>
+      <p class="figure-note mt-2 mb-0">${escapeHtml(t("patterns.coverageNote", {limit:coverage?.limit ?? patterns.length}))}</p>
+    </div></div><p class="failure-selection-note">${escapeHtml(t("patterns.sampleStrategy"))}</p>`;
+  el("failurePatterns").innerHTML = patterns.map((pattern,index)=>{
+    const share = clampRate(pattern.impact_share_pct);
+    const originalIndex = payload.failure_patterns.findIndex(item=>item.representative?.id === pattern.representative?.id);
+    const label = pattern.status_code >= 500 && pattern.status_code < 600 ? t("patterns.serverFailure") : t("patterns.non200Failure");
+    return `<article class="failure-card ${index===0?"failure-card-leading":""}">
+      <div class="failure-identity">
+      <div class="failure-labels"><span class="failure-rank">${String(index+1).padStart(2,"0")}</span><span class="failure-priority">${escapeHtml(label)}</span></div>
+      <div class="failure-signature"><span class="badge text-bg-light border font-monospace">${escapeHtml(pattern.method)}</span><span class="font-monospace small ms-2">HTTP ${Number(pattern.status_code)}</span><h3 class="failure-path">${escapeHtml(pattern.path)}</h3><code class="failure-code">${escapeHtml(pattern.error_code || t("patterns.noCode"))}</code></div>
+      </div>
+      <div class="failure-stats"><div><strong>${numberFormat(pattern.count)}</strong><span>${escapeHtml(t("patterns.occurrences"))}</span></div><div><strong>${rateFormat(share)}</strong><span>${escapeHtml(t("patterns.failureShare"))}</span></div><div><strong>${durationFormat(pattern.max_duration_ms)}</strong><span>${escapeHtml(t("patterns.maxLatency"))}</span></div></div>
+      <div class="failure-evidence"><div>${escapeHtml(t("patterns.average",{duration:durationFormat(pattern.avg_duration_ms)}))}</div><div>${escapeHtml(t("patterns.firstSeen",{time:compactTimeFormat(pattern.first_seen_ts)}))}</div><div>${escapeHtml(t("patterns.lastSeen",{time:compactTimeFormat(pattern.last_seen_ts)}))}</div></div>
+      <div class="failure-actions"><button type="button" class="btn ${index===0?"btn-primary":"btn-outline-primary"} btn-sm" data-pattern-detail="${originalIndex}">${escapeHtml(t("patterns.inspect"))}</button><button type="button" class="btn btn-sm btn-link" data-pattern-copy="${originalIndex}">${escapeHtml(t("patterns.copy"))}</button></div>
+    </article>`;
+  }).join("");
+}
+
+function reportConclusion(payload) {
+  const errors = Number(payload.failure_pattern_coverage?.total_error_requests ?? payload.summary.error_requests) || 0;
+  if (!payload.summary.total_requests && !errors) return t("report.noData");
+  if (!errors) return t("patterns.noFailures");
+  const groups = payload.failure_patterns || [];
+  if (!groups.length) return t("patterns.unavailable");
+  const concentration = window.LogArkAnalytics.concentration(groups.map(group=>group.count),errors);
+  return t("patterns.conclusion", {count:Math.min(3,groups.length),share:rateFormat(concentration.top_three_share_pct),method:groups[0].method,path:groups[0].path,status:groups[0].status_code,code:groups[0].error_code || t("patterns.noCode")});
+}
+
+function exportReport() {
+  const payload = state.dashboardPayload;
+  if (!payload) return;
+  const md = value => String(value ?? "").replace(/[\\`*_[\]<>#|]/g,"\\$&").replace(/[\r\n]+/g," ");
+  const params = state.appliedDashboardParams || {};
+  const filters = Object.entries(params).filter(([,value])=>value!=="").map(([key,value])=>`${key}: ${key==="api_key"?maskApiKey(value):value}`).join(" · ");
+  const lines = [`# LogArk · ${t("reportView.title")}`,"",`${timeFormat(payload.window.from_ts)} — ${timeFormat(payload.window.to_ts)}`,md(filters),"",`> ${t("patterns.rule")}`,"",`## ${t("report.title")}`,"",md(reportConclusion(payload)),"",
+    `- ${t("metrics.auditTotal")}: ${numberFormat(payload.summary.total_requests)}`,
+    `- ${t("metrics.non200Count")}: ${numberFormat(payload.summary.error_requests)}`,
+    `- ${t("metrics.non200Rate")}: ${rateFormat(payload.summary.error_rate,2)}`,"",
+    ...Array.from(el("reportFindings").querySelectorAll(".report-finding")).map(item=>`- ${md(item.textContent.trim())}`),"",
+    `## ${t("reportView.failuresTitle")}`,"", md(el("failureCoverage").textContent.trim()),"",t("patterns.sampleStrategy"),""];
+  for (const pattern of rankedPatterns(payload)) {
+    lines.push(`### ${md(failureSignature(pattern))}`,"",`${t("patterns.occurrences")}: ${numberFormat(pattern.count)} · ${t("patterns.failureShare")}: ${rateFormat(pattern.impact_share_pct)} · ${t("patterns.maxLatency")}: ${durationFormat(pattern.max_duration_ms)}`,md(`request_id: ${pattern.representative?.request_id || "—"} · ID: ${pattern.representative?.id || "—"}`),`${timeFormat(pattern.first_seen_ts)} — ${timeFormat(pattern.last_seen_ts)}`,"");
+  }
+  const url=URL.createObjectURL(new Blob([lines.join("\n")],{type:"text/markdown;charset=utf-8"}));
+  const anchor=document.createElement("a"); anchor.href=url; anchor.download=`logark-report-${new Date(payload.window.to_ts).toISOString().slice(0,10)}.md`;
+  document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
 
 function timelineRangeLabel(group) {
@@ -702,34 +739,20 @@ function renderTimeline(points, windowInfo) {
 
 function renderStatusDistribution(items, totalErrors) {
   const host = el("statusDistribution");
-  if (!Array.isArray(items) || items.length === 0) {
+  if (!Array.isArray(items) || !items.length || totalErrors <= 0) {
     host.innerHTML = emptyState(t("empty.noNon200Statuses"));
     return;
   }
-
-  host.innerHTML = items
-    .map((item) => {
-      const value = Number(item.value) || 0;
-      const share = totalErrors > 0 ? (value / totalErrors) * 100 : 0;
-      return `
-        <div class="list-group-item px-4 py-3">
-          <div class="d-flex justify-content-between align-items-center gap-3 mb-2">
-            <div class="d-flex align-items-center gap-2">
-              ${statusBadge(item.label)}
-              <span class="small text-body-secondary">HTTP ${escapeHtml(item.label)}</span>
-            </div>
-            <div class="text-end">
-              <div class="fw-semibold">${numberFormat(value)}</div>
-              <div class="mini-rate">${rateFormat(share)}</div>
-            </div>
-          </div>
-          <div class="progress rate-progress" role="progressbar" aria-label="${escapeHtml(t("aria.statusShare", { status: item.label }))}" aria-valuenow="${clampRate(share)}" aria-valuemin="0" aria-valuemax="100">
-            <div class="progress-bar bg-danger" style="width: ${clampRate(share)}%"></div>
-          </div>
-        </div>
-      `;
-    })
-    .join("");
+  const rows = [...items].sort((a,b)=>Number(b.value)-Number(a.value));
+  const other = Math.max(0,totalErrors-rows.reduce((sum,item)=>sum+Number(item.value),0));
+  if(other) rows.push({label:t("common.other"),value:other});
+  host.innerHTML = `<div class="status-bars">${rows.map((item,index)=>{
+    const share = clampRate(Number(item.value)/totalErrors*100);
+    return `<div class="status-bar-row ${index===0?"is-leading":""}">
+      <div class="d-flex align-items-center justify-content-between gap-2 mb-2"><span class="font-monospace small fw-semibold">${escapeHtml(/^\d+$/.test(String(item.label))?`HTTP ${item.label}`:item.label)}</span><span class="small">${numberFormat(item.value)} <span class="text-body-secondary ms-2">${rateFormat(share)}</span></span></div>
+      <div class="coverage-track" role="meter" aria-label="${escapeHtml(t("aria.statusShare",{status:item.label}))}" aria-valuenow="${share}" aria-valuemin="0" aria-valuemax="100"><div class="coverage-value" style="width:${share}%;background:${index===0?"var(--app-danger)":"var(--app-muted)"}"></div></div>
+    </div>`;
+  }).join("")}<p class="figure-note mt-4 mb-0">${escapeHtml(t("patterns.statusBasis",{count:numberFormat(totalErrors)}))}</p></div>`;
 }
 
 function renderMethodDistribution(items, totalErrors) {
@@ -931,6 +954,9 @@ function renderDetail(record) {
   el("detailError").classList.add("d-none");
   el("detailStatus").innerHTML = statusBadge(record.status_code);
   el("detailSubtitle").textContent = `${record.method} ${record.path} · ${timeFormat(record.request_ts)}`;
+  const context = el("detailPatternContext");
+  context.classList.toggle("d-none", !state.detailPattern);
+  context.textContent = state.detailPattern ? t("patterns.detailContext", {count: numberFormat(state.detailPattern.count), share: rateFormat(state.detailPattern.impact_share_pct ?? state.detailPattern.error_share), signature: failureSignature(state.detailPattern)}) : "";
 
   const meta = [
     [t("detail.recordId"), `#${record.id}`],
@@ -984,15 +1010,22 @@ function setRefreshLoading(loading) {
 
 async function loadDashboard() {
   const token = ++state.dashboardRequestToken;
+  const params = buildDashboardParams();
   let payload;
   try {
-    payload = await fetchJson(`/api/dashboard?${queryString(buildDashboardParams())}`);
+    payload = await fetchJson(`/api/dashboard?${queryString(params)}`);
   } catch (error) {
     if (token !== state.dashboardRequestToken) return false;
     throw error;
   }
   if (token !== state.dashboardRequestToken) return false;
+  state.dashboardPayload = payload;
+  state.appliedDashboardParams = params;
+  renderDashboardPayload(payload);
+  return true;
+}
 
+function renderDashboardPayload(payload) {
   renderMetricCards(payload.summary);
   renderReport(payload);
   renderHourlyVolumeChart(payload.error_timeline, payload.window);
@@ -1004,16 +1037,25 @@ async function loadDashboard() {
   renderDimensionList("topErrorKeys", payload.top_error_api_keys, { mask: true });
   renderDimensionList("topErrorTasks", payload.top_error_task_types);
   renderLatestErrors(payload.latest_errors);
+  renderFailurePatterns(payload);
+  window.LogArkFigures.render(payload, { t, locale: i18n.locale });
+  el("reportExportButton").disabled = false;
+  el("exportPreviewRange").textContent = timeWindowLabel(payload.window.hours);
+  el("exportPreviewStats").innerHTML = [
+    [t("metrics.auditTotal"), numberFormat(payload.summary.total_requests)],
+    [t("metrics.non200Rate"), rateFormat(payload.summary.error_rate, 2)],
+  ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  el("reportFreshness").textContent = `${timeFormat(payload.window.from_ts)} — ${timeFormat(payload.window.to_ts)}`;
   el("windowBadge").textContent = timeWindowLabel(payload.window.hours);
   el("windowBadge").title = t("time.rangeTitle", {
     from: timeFormat(payload.window.from_ts),
     to: timeFormat(payload.window.to_ts),
   });
-  return true;
 }
 
 async function loadRecords(append = false) {
   const token = ++state.recordRequestToken;
+  state.recordsLoading = true;
   const spinner = el("loadMoreSpinner");
   const loadMoreButton = el("loadMoreButton");
   const searchButton = el("searchButton");
@@ -1032,12 +1074,14 @@ async function loadRecords(append = false) {
     const payload = await fetchJson(`/api/records?${queryString(buildRecordParams(append))}`);
     if (token !== state.recordRequestToken) return false;
     renderRecords(payload, append);
+    state.recordsLoaded = true;
     return true;
   } catch (error) {
     if (token !== state.recordRequestToken) return false;
     throw error;
   } finally {
     if (token === state.recordRequestToken) {
+      state.recordsLoading = false;
       spinner.classList.add("d-none");
       loadMoreButton.disabled = !state.nextCursorTs;
       loadMoreButton.setAttribute("aria-busy", "false");
@@ -1051,9 +1095,16 @@ async function refreshAll() {
   const token = ++state.refreshToken;
   hidePageError();
   setRefreshLoading(true);
+  el("reportExportButton").disabled = true;
   try {
-    const results = await Promise.all([loadDashboard(), loadRecords(false)]);
-    if (token === state.refreshToken && results.every(Boolean)) {
+    const loaded = await loadDashboard();
+    if (token === state.refreshToken && loaded) {
+      state.recordsLoaded = false;
+      ++state.recordRequestToken;
+      state.recordsLoading = false;
+      state.nextCursorTs = null;
+      state.nextCursorId = null;
+      if (el("recordsDisclosure").open) await loadRecords(false);
       el("lastUpdated").textContent = t("status.updatedAt", {
         time: new Date().toLocaleTimeString(i18n.locale, { hour12: false }),
       });
@@ -1065,9 +1116,10 @@ async function refreshAll() {
   }
 }
 
-async function loadDetailById(id) {
+async function loadDetailById(id, pattern = null) {
   if (!id) return;
   const token = ++state.detailRequestToken;
+  state.detailPattern = pattern;
   state.detailModal.show();
   el("detailLoading").classList.remove("d-none");
   el("detailError").classList.add("d-none");
@@ -1139,7 +1191,59 @@ el("recordsTable").addEventListener("keydown", handleRecordActivation);
 el("localeSelect").addEventListener("change", (event) => {
   if (!i18n.setLocale(event.target.value)) return;
   i18n.apply();
-  refreshAll();
+  if (state.dashboardPayload) renderDashboardPayload(state.dashboardPayload);
+  if (el("recordsDisclosure").open) loadRecords(false).catch(showPageError);
+});
+
+el("patternSort").addEventListener("change", () => {
+  if (state.dashboardPayload) renderFailurePatterns(state.dashboardPayload);
+});
+el("hours").addEventListener("change", refreshAll);
+el("reportExportButton").addEventListener("click", exportReport);
+el("recordsDisclosure").addEventListener("toggle", () => {
+  if (el("recordsDisclosure").open && state.dashboardPayload && !state.recordsLoaded && !state.recordsLoading) loadRecords(false).catch(showPageError);
+});
+el("hourlyVolumeChart").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-chart-mode]");
+  if (!button || !state.dashboardPayload) return;
+  state.chartMode = button.dataset.chartMode;
+  renderHourlyVolumeChart(state.dashboardPayload.error_timeline, state.dashboardPayload.window);
+  el("hourlyVolumeChart").querySelector(`[data-chart-mode="${state.chartMode}"]`)?.focus();
+});
+el("failurePatterns").addEventListener("click", async (event) => {
+  const detailButton = event.target.closest("[data-pattern-detail]");
+  const copyButton = event.target.closest("[data-pattern-copy]");
+  const button = detailButton || copyButton;
+  if (!button || !state.dashboardPayload) return;
+  const pattern = state.dashboardPayload.failure_patterns[Number(detailButton ? button.dataset.patternDetail : button.dataset.patternCopy)];
+  if (!pattern) return;
+  if (detailButton) { loadDetailById(pattern.representative?.id, pattern); return; }
+  try {
+    await navigator.clipboard.writeText(`${failureSignature(pattern)}\nrequest_id: ${pattern.representative?.request_id || ""}`);
+    button.textContent = t("patterns.copied");
+    setTimeout(()=>{if(button.isConnected)button.textContent=t("patterns.copy");},1800);
+  } catch (_) {
+    showPageError(new Error(t("patterns.copyFailed")));
+  }
+});
+document.querySelectorAll('a[href="#recordsDisclosure"], a[href="#requestDetails"]').forEach(link=>link.addEventListener("click",()=>{el("recordsDisclosure").open=true;}));
+document.querySelectorAll(".report-nav a, .report-side-nav a").forEach(link=>link.addEventListener("click",()=>{
+  document.querySelectorAll(".report-nav a, .report-side-nav a").forEach(item=>{
+    const active = item.getAttribute("href") === link.getAttribute("href");
+    item.classList.toggle("active",active);
+    if(active)item.setAttribute("aria-current","location");
+    else item.removeAttribute("aria-current");
+  });
+}));
+let chartResizeTimer;
+window.addEventListener("resize", () => {
+  clearTimeout(chartResizeTimer);
+  chartResizeTimer = setTimeout(() => {
+    if (state.dashboardPayload) {
+      renderHourlyVolumeChart(state.dashboardPayload.error_timeline, state.dashboardPayload.window);
+      window.LogArkFigures.render(state.dashboardPayload, { t, locale: i18n.locale });
+    }
+  }, 150);
 });
 
 if (typeof bootstrap !== "undefined" && bootstrap.Modal) {
