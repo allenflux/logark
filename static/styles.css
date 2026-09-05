@@ -1039,3 +1039,19 @@ a:hover { color: var(--app-link-dark); }
   .scientific-panel-wide { grid-column: 1 / -1; }
   .report-footer { margin-top: 24px; padding-bottom: 0; border-top: 1px solid var(--app-rule); }
 }
+
+.report-refresh-status {
+  margin: -8px 0 24px;
+  padding: 12px 16px;
+  border-left: 2px solid #7893a6;
+  background: #f0f4f6;
+  color: #46545e;
+  font-size: 13px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.report-refresh-status[hidden] { display: none; }
+.report-freshness { white-space: pre-line; overflow-wrap: anywhere; }
+@media print {
+  .report-refresh-status { display: none !important; }
+}

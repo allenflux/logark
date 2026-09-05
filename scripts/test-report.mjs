@@ -50,6 +50,20 @@ const fixture = {
 
 let scenario = "report";
 const requests = [];
+const responseGates = [];
+function gateResponse(pathname, match = () => true) {
+  let received, release, closed;
+  const gate = {
+    pathname, match, taken: false,
+    received: new Promise((resolve) => { received = resolve; }),
+    released: new Promise((resolve) => { release = resolve; }),
+    closed: new Promise((resolve) => { closed = resolve; }),
+    release: (result) => release(result),
+    arrive(url, response) { received(url); response.once("close", closed); },
+  };
+  responseGates.push(gate);
+  return gate;
+}
 const injection = '/api/' + 'long-path-'.repeat(60) + '<img src=x onerror="window.__reportInjection=true">';
 function dashboard(url) {
   const payload = structuredClone(fixture);
@@ -77,7 +91,18 @@ const mime = { html: "text/html", js: "text/javascript", css: "text/css", svg: "
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, "http://localhost");
   requests.push(url);
-  const json = (body, status = 200) => { response.writeHead(status, { "Content-Type": "application/json" }); response.end(JSON.stringify(body)); };
+  const json = async (body, status = 200) => {
+    const gate = responseGates.find((item) => !item.taken && item.pathname === url.pathname && item.match(url));
+    if (gate) {
+      gate.taken = true;
+      gate.arrive(url, response);
+      const override = await Promise.race([gate.released, gate.closed]);
+      if (response.destroyed) return;
+      if (override) { body = override.body; status = override.status; }
+    }
+    response.writeHead(status, { "Content-Type": "application/json" });
+    response.end(JSON.stringify(body));
+  };
   if (url.pathname === "/api/dashboard") {
     if (scenario === "failure") return json({ error: "Fixture report unavailable" }, 503);
     return json(dashboard(url));
@@ -121,21 +146,30 @@ async function ready(page) {
   }
   await page.evaluate(() => window.LogArkAnalytics.ready);
 }
-async function openPage({ mode = "report", mobile = false, blockWasm = false } = {}) {
+async function openPage({ mode = "report", mobile = false, blockWasm = false, waitForReport = true } = {}) {
   scenario = mode;
   const context = await browser.newContext({ viewport: mobile ? { width: 390, height: 844 } : { width: 1440, height: 1100 },
     locale: "zh-CN", reducedMotion: "reduce", acceptDownloads: true });
   const page = await context.newPage();
   page.on("pageerror", (error) => browserErrors.push(error.message));
   if (blockWasm) await page.route("**/assets/analytics.wasm", (route) => route.abort());
-  await page.goto(origin, { waitUntil: "networkidle" });
-  await ready(page);
+  await page.goto(origin, { waitUntil: waitForReport ? "networkidle" : "domcontentloaded" });
+  if (waitForReport) await ready(page);
   return { page, context };
 }
 async function paths(page) { return page.locator("#failurePatterns .failure-path").allTextContents(); }
 async function noOverflow(page, label) {
   const widths = await page.evaluate(() => ({ viewport: innerWidth, document: document.documentElement.scrollWidth, body: document.body.scrollWidth }));
   assert.ok(widths.document <= widths.viewport + 1 && widths.body <= widths.viewport + 1, `${label}: ${JSON.stringify(widths)}`);
+}
+async function exportedReport(page) {
+  const pending = page.waitForEvent("download");
+  await page.click("#reportExportButton");
+  const download = await pending;
+  return readFile(await download.path(), "utf8");
+}
+async function finishPaint(page) {
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
 
 try {
@@ -227,7 +261,104 @@ try {
   assert.match(exported, /\/api\/v1\/scoped/);
   assert.ok(!exported.includes("report-filter-secret-12345"), "export masks the applied API key");
   assert.ok(!exported.includes("unapplied-draft"), "export uses the applied report scope");
+
+  const previousMetrics = await page.locator("#metricCards").textContent();
+  const delayed = gateResponse("/api/dashboard", (url) => url.searchParams.get("path") === "/api/v1/new-scope");
+  await page.fill("#path", "/api/v1/new-scope");
+  await page.click("#refreshButton");
+  await delayed.received;
+  const pendingRequestCount = dashboardRequests().length;
+  assert.equal(await page.locator("#reportExportButton").isDisabled(), false, "the last complete report stays exportable while updating");
+  assert.equal(await page.locator("#metricCards").textContent(), previousMetrics, "refreshing must retain readable report metrics");
+  assert.match(await page.locator("#reportFreshness").textContent(), /\/api\/v1\/scoped/);
+  assert.ok(!(await page.locator("#reportFreshness").textContent()).includes("report-filter-secret-12345"), "displayed scope masks the API key");
+  await page.fill("#path", "/draft-during-request");
+  assert.equal(await page.locator("#refreshButton").isDisabled(), false, "editing filters can supersede an in-flight request");
+  await page.fill("#path", "/api/v1/new-scope");
+  assert.equal(await page.locator("#refreshButton").isDisabled(), true, "unchanged in-flight filters remain deduplicated");
+  await page.evaluate(() => {
+    document.getElementById("dashboardFilter").requestSubmit();
+    document.getElementById("dashboardFilter").requestSubmit();
+  });
+  await page.locator(".report-refresh-status").filter({ hasText: "server has not returned" }).waitFor({ timeout: 8000 });
+  assert.equal(dashboardRequests().length, pendingRequestCount, "duplicate form submissions share one in-flight dashboard request");
+  await page.click("#searchButton");
+  await page.waitForFunction(() => document.getElementById("searchButton").getAttribute("aria-busy") === "false");
+  assert.equal(recordsRequests().at(-1).searchParams.get("path"), "/api/v1/scoped", "records retain the completed scope while a new report is pending");
+  const pendingExport = await exportedReport(page);
+  assert.match(pendingExport, /\/api\/v1\/scoped/);
+  assert.ok(!pendingExport.includes("/api/v1/new-scope"), "pending filters must not leak into the old report export");
+  await page.locator("#reportOverview").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: "/tmp/tracenote-report-updating.png" });
+  delayed.release({ status: 503, body: { error: "Fixture delayed report unavailable" } });
+  await ready(page);
+  assert.equal(await page.locator(".report-refresh-status").getAttribute("data-state"), "failed");
+  assert.match(await page.locator(".report-refresh-status").textContent(), /previous report is still available/);
+  assert.equal(await page.locator("#refreshSpinner").isVisible(), false, "failed refresh stops its spinner");
+  assert.equal(await page.locator("#reportExportButton").isDisabled(), false, "failure keeps the previous report export enabled");
+  assert.equal(await page.locator("#metricCards").textContent(), previousMetrics);
+  assert.match(await page.locator("#reportFreshness").textContent(), /\/api\/v1\/scoped/);
+  assert.match(await exportedReport(page), /\/api\/v1\/scoped/);
+
+  const retry = gateResponse("/api/dashboard");
+  const delayedRecords = gateResponse("/api/records", (url) => url.searchParams.get("path") === "/api/v1/new-scope");
+  await page.click("#refreshButton");
+  await retry.received;
+  retry.release();
+  await delayedRecords.received;
+  await ready(page);
+  assert.equal(await page.locator("#pageAlert").isVisible(), false);
+  assert.match(await page.locator("#reportFreshness").textContent(), /\/api\/v1\/new-scope/);
+  assert.equal(await page.locator("#searchButton").getAttribute("aria-busy"), "true", "records remain pending after the report finishes");
+  assert.equal(await page.locator("#recordsTable [data-record-id]").count(), 0, "a new report must not display records from the previous scope");
+  assert.match(await exportedReport(page), /\/api\/v1\/new-scope/);
+  delayedRecords.release();
+  await page.locator("#recordsTable [data-record-id]").first().waitFor();
+  await page.locator("#recordsDisclosure > summary").click();
+
+  const superseded = gateResponse("/api/dashboard", (url) => url.searchParams.get("hours") === "6");
+  await page.selectOption("#hours", "6");
+  await superseded.received;
+  assert.equal(await page.locator("#windowBadge").textContent(), "Last 24 hours");
+  const abortObserved = Promise.race([
+    superseded.closed.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 2000)),
+  ]);
+  await page.selectOption("#hours", "1");
+  await ready(page);
+  assert.equal(await abortObserved, true, "a changed reporting period cancels the previous HTTP request");
+  superseded.release();
+  assert.equal(await page.locator("#windowBadge").textContent(), "Last 1 hour");
+
+  // Make cancellation ineffective for one transport race so the late-response guard is exercised independently.
+  await page.evaluate(() => {
+    window.__fixtureFetch = window.fetch;
+    window.fetch = (url, options) => window.__fixtureFetch(url,
+      String(url).startsWith("/api/dashboard?") ? { ...options, signal: undefined } : options);
+  });
+  const lateReport = gateResponse("/api/dashboard", (url) => url.searchParams.get("hours") === "72");
+  await page.selectOption("#hours", "72");
+  await lateReport.received;
+  await page.selectOption("#hours", "168");
+  await ready(page);
+  const lateResponse = page.waitForResponse((response) => new URL(response.url()).searchParams.get("hours") === "72");
+  lateReport.release();
+  await (await lateResponse).finished();
+  await finishPaint(page);
+  assert.equal(await page.locator("#windowBadge").textContent(), "Last 7 days", "late superseded results cannot overwrite the most recent report");
+  assert.match(await exportedReport(page), /hours: 168/);
+  await page.evaluate(() => { window.fetch = window.__fixtureFetch; delete window.__fixtureFetch; });
   await context.close();
+
+  const initialReport = gateResponse("/api/dashboard");
+  const firstLoad = await openPage({ waitForReport: false });
+  await initialReport.received;
+  assert.match(await firstLoad.page.locator("#metricCards").textContent(), /正在读取汇总统计/);
+  assert.ok(!(await firstLoad.page.locator("#metricCards").textContent()).includes("计算错误率"));
+  assert.equal(await firstLoad.page.locator("#reportExportButton").isDisabled(), true);
+  initialReport.release();
+  await ready(firstLoad.page);
+  await firstLoad.context.close();
 
   const mobile = await openPage({ mobile: true });
   await noOverflow(mobile.page, "mobile report");
@@ -272,6 +403,9 @@ try {
       assert.equal(await empty.page.locator("#pageAlert").isVisible(), true);
       assert.match(await empty.page.locator("#pageAlertMessage").textContent(), /Fixture report unavailable/);
       assert.equal(await empty.page.locator("#reportExportButton").isDisabled(), true);
+      assert.equal(await empty.page.locator("#metricCards .spinner-border").count(), 0, "an initial failure must not leave a loading spinner running");
+      assert.match(await empty.page.locator("#metricCards").textContent(), /读取失败/);
+      assert.equal(await empty.page.locator(".report-refresh-status").getAttribute("data-state"), "failed");
     } else {
       assert.equal(await empty.page.locator("#failurePatterns .failure-card").count(), 0);
       assert.match(await empty.page.locator("#failurePatterns").textContent(), /没有非 200/);
@@ -283,7 +417,7 @@ try {
   assert.deepEqual(browserErrors, [], "browser must have no uncaught application errors");
   assert.ok((await stat("/tmp/logark-report-desktop.png")).size > 1000);
   assert.ok((await stat("/tmp/logark-report-mobile.png")).size > 1000);
-  console.log("report browser checks passed (WASM/fallback, ranking, coverage, detail, locale, statistical figures and tables, chart keyboard control, applied filters, lazy records, pagination, Markdown export, desktop/tablet/mobile overflow, hostile paths, empty/success/error states)");
+  console.log("report browser checks passed (WASM/fallback, ranking, coverage, detail, locale, statistical figures and tables, chart keyboard control, applied filters, lazy records, pagination, Markdown export, delayed refresh and preserved scope, request deduplication/cancellation/late-response guard, nonblocking records, desktop/tablet/mobile overflow, hostile paths, empty/success/error states)");
   console.log("Screenshots: /tmp/logark-report-desktop.png and /tmp/logark-report-mobile.png");
 } finally {
   await browser?.close();

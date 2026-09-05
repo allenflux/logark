@@ -1,11 +1,10 @@
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
+mod dashboard_cache;
+
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use dashboard_cache::DashboardCache;
 use sqlx::{MySql, MySqlPool, QueryBuilder, Row};
-use tokio::sync::RwLock;
 
 use crate::{
     config::Config,
@@ -21,12 +20,7 @@ use crate::{
 pub struct AuditAnalyticsService {
     pool: MySqlPool,
     config: Config,
-    dashboard_cache: std::sync::Arc<RwLock<HashMap<String, CacheEntry>>>,
-}
-
-struct CacheEntry {
-    expires_at: Instant,
-    payload: DashboardResponse,
+    dashboard_cache: std::sync::Arc<DashboardCache<DashboardResponse>>,
 }
 
 #[derive(Clone)]
@@ -64,10 +58,14 @@ struct FailurePatternRow {
 
 impl AuditAnalyticsService {
     pub fn new(pool: MySqlPool, config: Config) -> Self {
+        // A report already fans out into nine SQL branches. Bound distinct
+        // reports as well as coalescing requests for the same filter.
+        let concurrent_reports = (config.db_max_connections / 9).clamp(1, 2) as usize;
+        let query_timeout = Duration::from_secs(config.analytics_query_timeout_secs);
         Self {
             pool,
             config,
-            dashboard_cache: std::sync::Arc::new(RwLock::new(HashMap::new())),
+            dashboard_cache: DashboardCache::new(64, concurrent_reports, query_timeout),
         }
     }
 
@@ -79,12 +77,26 @@ impl AuditAnalyticsService {
             api_key: normalize_str(query.api_key),
             task_type: normalize_str(query.task_type),
         };
-        let cache_key = dashboard_cache_key(&window, &filter, self.config.analytics_cache_ttl_secs);
+        let cache_key = dashboard_cache_key(&window, &filter);
+        let ttl = Duration::from_secs(self.config.analytics_cache_ttl_secs);
+        let service = self.clone();
+        let payload = self
+            .dashboard_cache
+            .get_or_load(cache_key, ttl, async move {
+                // Resolve time after queueing so a report always describes its
+                // actual computation window, not when a waiting client arrived.
+                let window = service.resolve_window(Some(window.hours));
+                service.compute_dashboard(&window, &filter).await
+            })
+            .await?;
+        Ok((*payload).clone())
+    }
 
-        if let Some(payload) = self.get_cached_dashboard(&cache_key).await {
-            return Ok(payload);
-        }
-
+    async fn compute_dashboard(
+        &self,
+        window: &AnalyticsWindow,
+        filter: &CommonFilter,
+    ) -> anyhow::Result<DashboardResponse> {
         let (
             summary,
             error_timeline,
@@ -96,15 +108,27 @@ impl AuditAnalyticsService {
             (failure_patterns, failure_pattern_coverage),
             latest_errors,
         ) = tokio::try_join!(
-            self.fetch_summary(&window, &filter),
-            self.fetch_timeline(&window, &filter),
-            self.fetch_top_error_paths(&window, &filter),
-            self.fetch_error_status_distribution(&window, &filter),
-            self.fetch_error_method_distribution(&window, &filter),
-            self.fetch_top_error_api_keys(&window, &filter),
-            self.fetch_top_error_task_types(&window, &filter),
-            self.fetch_failure_patterns(&window, &filter),
-            self.fetch_latest_errors(&window, &filter),
+            timed_dashboard_query("summary", self.fetch_summary(window, filter)),
+            timed_dashboard_query("timeline", self.fetch_timeline(window, filter)),
+            timed_dashboard_query("paths", self.fetch_top_error_paths(window, filter)),
+            timed_dashboard_query(
+                "statuses",
+                self.fetch_error_status_distribution(window, filter)
+            ),
+            timed_dashboard_query(
+                "methods",
+                self.fetch_error_method_distribution(window, filter)
+            ),
+            timed_dashboard_query("api_keys", self.fetch_top_error_api_keys(window, filter)),
+            timed_dashboard_query(
+                "task_types",
+                self.fetch_top_error_task_types(window, filter)
+            ),
+            timed_dashboard_query(
+                "failure_patterns",
+                self.fetch_failure_patterns(window, filter)
+            ),
+            timed_dashboard_query("latest_errors", self.fetch_latest_errors(window, filter)),
         )?;
 
         let payload = DashboardResponse {
@@ -126,8 +150,6 @@ impl AuditAnalyticsService {
             latest_errors,
         };
 
-        self.store_cached_dashboard(cache_key, payload.clone())
-            .await;
         Ok(payload)
     }
 
@@ -280,7 +302,7 @@ impl AuditAnalyticsService {
     }
 
     pub async fn cache_entry_count(&self) -> usize {
-        self.dashboard_cache.read().await.len()
+        self.dashboard_cache.len().await
     }
 
     pub async fn health_snapshot(&self) -> anyhow::Result<(i64, Option<i64>)> {
@@ -424,30 +446,6 @@ impl AuditAnalyticsService {
         }
     }
 
-    async fn get_cached_dashboard(&self, key: &str) -> Option<DashboardResponse> {
-        let cache = self.dashboard_cache.read().await;
-        cache.get(key).and_then(|entry| {
-            if entry.expires_at > Instant::now() {
-                Some(entry.payload.clone())
-            } else {
-                None
-            }
-        })
-    }
-
-    async fn store_cached_dashboard(&self, key: String, payload: DashboardResponse) {
-        let mut cache = self.dashboard_cache.write().await;
-        cache.retain(|_, entry| entry.expires_at > Instant::now());
-        cache.insert(
-            key,
-            CacheEntry {
-                expires_at: Instant::now()
-                    + Duration::from_secs(self.config.analytics_cache_ttl_secs),
-                payload,
-            },
-        );
-    }
-
     async fn fetch_summary(
         &self,
         window: &AnalyticsWindow,
@@ -512,22 +510,37 @@ impl AuditAnalyticsService {
             return Ok(0);
         }
 
-        let offset = ((total_requests as f64) * 0.95).ceil() as i64 - 1;
+        // The exact nearest-rank P95 is ceil(19N / 20) in ascending order.
+        // Reading descending instead skips N - ceil(19N / 20) = floor(N / 20)
+        // rows. This requests roughly the first 5% instead of 95% of the sorted
+        // window; the database can still need to scan and sort the full window.
+        let offset = p95_descending_offset(total_requests);
         let mut qb: QueryBuilder<MySql> =
             QueryBuilder::new("SELECT duration_ms FROM api_audit_log WHERE request_ts BETWEEN ");
         qb.push_bind(window.from_ts)
             .push(" AND ")
             .push_bind(window.to_ts);
         push_common_filters(&mut qb, filter);
-        qb.push(" ORDER BY duration_ms ASC LIMIT 1 OFFSET ")
-            .push_bind(offset.max(0));
+        qb.push(" ORDER BY duration_ms DESC LIMIT 1 OFFSET ")
+            .push_bind(offset);
 
-        let row = qb
-            .build()
-            .fetch_optional(&self.pool)
-            .await?
-            .context("p95 row missing")?;
-        Ok(row.try_get("duration_ms")?)
+        let started_at = Instant::now();
+        let result: anyhow::Result<i32> = async {
+            let row = qb
+                .build()
+                .fetch_optional(&self.pool)
+                .await?
+                .context("p95 row missing")?;
+            Ok(row.try_get("duration_ms")?)
+        }
+        .await;
+        tracing::info!(
+            query = "p95_duration",
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            success = result.is_ok(),
+            "dashboard query finished"
+        );
+        result
     }
 
     async fn fetch_timeline(
@@ -780,6 +793,10 @@ impl AuditAnalyticsService {
     }
 }
 
+fn p95_descending_offset(total_requests: i64) -> i64 {
+    total_requests.max(0) / 20
+}
+
 fn failure_patterns_query<'a>(
     window: &AnalyticsWindow,
     filter: &'a CommonFilter,
@@ -919,18 +936,27 @@ fn percentage(part: i64, total: i64) -> f64 {
     }
 }
 
-fn dashboard_cache_key(
-    window: &AnalyticsWindow,
-    filter: &CommonFilter,
-    cache_ttl_secs: u64,
-) -> String {
-    let cache_bucket_ms = i64::try_from(cache_ttl_secs.max(1))
-        .unwrap_or(i64::MAX / 1_000)
-        .saturating_mul(1_000);
+async fn timed_dashboard_query<T>(
+    query: &'static str,
+    operation: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    let started_at = Instant::now();
+    let result = operation.await;
+    tracing::info!(
+        query,
+        elapsed_ms = started_at.elapsed().as_millis() as u64,
+        success = result.is_ok(),
+        "dashboard query completed"
+    );
+    result
+}
+
+fn dashboard_cache_key(window: &AnalyticsWindow, filter: &CommonFilter) -> String {
+    // Cache expiry determines freshness. A wall-clock bucket makes a slow
+    // calculation obsolete before its completed result can even be reused.
     format!(
-        "{}:{}:{}{}{}{}",
+        "{}:{}{}{}{}",
         window.hours,
-        window.to_ts / cache_bucket_ms,
         cache_filter_part(filter.path.as_deref()),
         cache_filter_part(filter.method.as_deref()),
         cache_filter_part(filter.api_key.as_deref()),
@@ -961,7 +987,37 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_cache_key_is_stable_inside_ttl_bucket() {
+    fn descending_p95_matches_nearest_rank_for_small_and_duplicate_samples() {
+        for size in [1usize, 2, 19, 20, 21, 39, 40, 41, 99, 100, 101, 1_001] {
+            // Duplicated, initially unordered durations exercise tie handling.
+            let mut durations: Vec<_> = (0..size)
+                .map(|index| ((index * 37 + 11) % 127) as i32)
+                .collect();
+            durations.sort_unstable();
+            let nearest_rank = (19 * size).div_ceil(20);
+            let expected = durations[nearest_rank - 1];
+            let old_ascending_offset = ((size as f64) * 0.95).ceil() as usize - 1;
+            assert_eq!(durations[old_ascending_offset], expected);
+
+            durations.reverse();
+            let offset = p95_descending_offset(size as i64) as usize;
+            assert_eq!(durations[offset], expected, "sample size {size}");
+        }
+    }
+
+    #[test]
+    fn descending_p95_offset_preserves_exact_rank_without_float_or_overflow() {
+        for total in [1i64, 19, 20, 21, 100, (1i64 << 53) + 19, i64::MAX] {
+            let ascending_rank = (19 * i128::from(total) + 19) / 20;
+            let descending_offset = i128::from(p95_descending_offset(total));
+            assert_eq!(i128::from(total) - descending_offset, ascending_rank);
+        }
+        assert_eq!(p95_descending_offset(0), 0);
+        assert_eq!(p95_descending_offset(-1), 0);
+    }
+
+    #[test]
+    fn dashboard_cache_key_is_stable_across_slow_queries_and_clock_buckets() {
         let filter = CommonFilter {
             path: None,
             method: None,
@@ -975,15 +1031,15 @@ mod tests {
             bucket_ms: 900_000,
         };
         let second = AnalyticsWindow {
-            from_ts: 2,
-            to_ts: 30_999,
+            from_ts: 36_002,
+            to_ts: 66_002,
             hours: 24,
             bucket_ms: 900_000,
         };
 
         assert_eq!(
-            dashboard_cache_key(&first, &filter, 15),
-            dashboard_cache_key(&second, &filter, 15)
+            dashboard_cache_key(&first, &filter),
+            dashboard_cache_key(&second, &filter)
         );
     }
 
@@ -1009,8 +1065,8 @@ mod tests {
         };
 
         assert_ne!(
-            dashboard_cache_key(&window, &empty_filter, 15),
-            dashboard_cache_key(&window, &literal_filter, 15)
+            dashboard_cache_key(&window, &empty_filter),
+            dashboard_cache_key(&window, &literal_filter)
         );
     }
 
@@ -1119,12 +1175,18 @@ mod tests {
         .execute(&mut connection)
         .await?;
         for index in 0..18_i32 {
-            sqlx::query("INSERT INTO api_audit_log (request_ts, duration_ms, error_code) VALUES (?, ?, ?)")
-                .bind(if index == 17 { 1_001_i64 } else { 1_000 + i64::from(index) * 10 })
-                .bind(100 + index * 10)
-                .bind([None, Some(""), Some("   ")][index as usize % 3])
-                .execute(&mut connection)
-                .await?;
+            sqlx::query(
+                "INSERT INTO api_audit_log (request_ts, duration_ms, error_code) VALUES (?, ?, ?)",
+            )
+            .bind(if index == 17 {
+                1_001_i64
+            } else {
+                1_000 + i64::from(index) * 10
+            })
+            .bind(100 + index * 10)
+            .bind([None, Some(""), Some("   ")][index as usize % 3])
+            .execute(&mut connection)
+            .await?;
         }
         sqlx::query(
             "INSERT INTO api_audit_log (request_ts, duration_ms, path, status_code, error_code) VALUES \
@@ -1143,11 +1205,13 @@ mod tests {
         .execute(&mut connection)
         .await?;
         for index in 0..13 {
-            sqlx::query("INSERT INTO api_audit_log (request_ts, duration_ms, path) VALUES (?, 100, ?)")
-                .bind(7_000 + index)
-                .bind(format!("/v1/rare-{index}"))
-                .execute(&mut connection)
-                .await?;
+            sqlx::query(
+                "INSERT INTO api_audit_log (request_ts, duration_ms, path) VALUES (?, 100, ?)",
+            )
+            .bind(7_000 + index)
+            .bind(format!("/v1/rare-{index}"))
+            .execute(&mut connection)
+            .await?;
         }
         sqlx::query(
             "INSERT INTO api_audit_log (request_ts, duration_ms, method, api_key, task_type) VALUES \
@@ -1179,18 +1243,32 @@ mod tests {
         assert_eq!(rows[1].count, 2);
         assert_eq!(rows.iter().map(|row| row.count).sum::<i64>(), 30);
 
-        let earlier_window = AnalyticsWindow { to_ts: 3_000, ..window.clone() };
+        let earlier_window = AnalyticsWindow {
+            to_ts: 3_000,
+            ..window.clone()
+        };
         let earlier = failure_patterns_query(&earlier_window, &filter)
             .build_query_as::<FailurePatternRow>()
             .fetch_all(&mut connection)
             .await?;
         assert_eq!(earlier.len(), 6);
-        assert!(earlier.iter().any(|row| row.representative.path == "/v1/Generate"));
-        assert!(earlier.iter().any(|row| row.normalized_error_code.as_deref() == Some("timeout")));
-        assert!(earlier.iter().any(|row| row.representative.status_code == 201));
-        assert!(earlier.iter().any(|row| row.representative.status_code == 302));
+        assert!(earlier
+            .iter()
+            .any(|row| row.representative.path == "/v1/Generate"));
+        assert!(earlier
+            .iter()
+            .any(|row| row.normalized_error_code.as_deref() == Some("timeout")));
+        assert!(earlier
+            .iter()
+            .any(|row| row.representative.status_code == 201));
+        assert!(earlier
+            .iter()
+            .any(|row| row.representative.status_code == 302));
 
-        let empty_filter = CommonFilter { path: Some("/v1/success".into()), ..filter };
+        let empty_filter = CommonFilter {
+            path: Some("/v1/success".into()),
+            ..filter
+        };
         let empty = failure_patterns_query(&window, &empty_filter)
             .build_query_as::<FailurePatternRow>()
             .fetch_all(&mut connection)

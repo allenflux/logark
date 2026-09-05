@@ -9,6 +9,12 @@ const state = {
   dashboardRequestToken: 0,
   recordRequestToken: 0,
   refreshToken: 0,
+  dashboardRequest: null,
+  dashboardLoading: false,
+  dashboardSlow: false,
+  dashboardRefreshFailed: false,
+  dashboardUpdatedAt: null,
+  recordRequestController: null,
   recordBaseParams: null,
   detailModal: null,
   dashboardPayload: null,
@@ -21,8 +27,8 @@ const state = {
 
 const el = (id) => document.getElementById(id);
 
-async function fetchJson(url) {
-  const response = await fetch(url, { headers: { Accept: "application/json" } });
+async function fetchJson(url, signal) {
+  const response = await fetch(url, { headers: { Accept: "application/json" }, signal });
   const text = await response.text();
   let body;
 
@@ -1002,18 +1008,69 @@ function hidePageError() {
 }
 
 function setRefreshLoading(loading) {
-  el("refreshButton").disabled = loading;
+  el("refreshButton").disabled = loading && state.dashboardRequest?.key === queryString(buildDashboardParams());
   el("refreshButton").setAttribute("aria-busy", String(loading));
   el("refreshSpinner").classList.toggle("d-none", !loading);
   el("refreshIcon").classList.toggle("d-none", loading);
 }
 
-async function loadDashboard() {
+const refreshStatus = document.createElement("p");
+refreshStatus.className = "report-refresh-status";
+refreshStatus.setAttribute("role", "status");
+refreshStatus.setAttribute("aria-live", "polite");
+refreshStatus.hidden = true;
+el("dashboardFilter").insertAdjacentElement("afterend", refreshStatus);
+
+function displayedScope() {
+  const params = state.appliedDashboardParams;
+  if (!params) return "";
+  const parts = [timeWindowLabel(state.dashboardPayload.window.hours)];
+  if (params.path) parts.push(`${t("fields.pathPrefix")}: ${params.path}`);
+  if (params.method) parts.push(`${t("fields.method")}: ${params.method}`);
+  if (params.task_type) parts.push(`${t("fields.taskType")}: ${params.task_type}`);
+  if (params.api_key) parts.push(`${t("fields.apiKey")}: ${maskApiKey(params.api_key)}`);
+  return parts.join(" · ");
+}
+
+function renderRefreshStatus() {
+  setRefreshLoading(state.dashboardLoading);
+  const hasReport = Boolean(state.dashboardPayload);
+  let message = "";
+  if (state.dashboardLoading) {
+    message = hasReport ? t("refresh.updating") : t("refresh.reading");
+    if (state.dashboardSlow) message += ` ${t("refresh.waiting")}`;
+  } else if (state.dashboardRefreshFailed) {
+    message = hasReport ? t("refresh.failedExisting") : t("refresh.failedInitial");
+  } else if (hasReport && queryString(buildDashboardParams()) !== queryString(state.appliedDashboardParams)) {
+    message = t("refresh.filtersPending");
+  }
+  refreshStatus.textContent = message;
+  refreshStatus.hidden = !message;
+  refreshStatus.dataset.state = state.dashboardLoading ? "loading" : state.dashboardRefreshFailed ? "failed" : "pending";
+  if (hasReport) {
+    const { from_ts, to_ts } = state.dashboardPayload.window;
+    el("reportFreshness").textContent = `${t("refresh.displayedScope", { scope: displayedScope() })}\n${timeFormat(from_ts)} — ${timeFormat(to_ts)}`;
+  }
+  if (state.dashboardUpdatedAt) {
+    el("lastUpdated").textContent = t("status.updatedAt", {
+      time: state.dashboardUpdatedAt.toLocaleTimeString(i18n.locale, { hour12: false }),
+    });
+  }
+}
+
+function renderInitialReportState(loading) {
+  if (state.dashboardPayload) return;
+  const message = escapeHtml(loading ? t("refresh.reading") : t("refresh.failedInitial"));
+  const spinner = loading ? '<span class="spinner-border spinner-border-sm" aria-hidden="true"></span>' : "";
+  el("metricCards").innerHTML = `<div class="metrics-loading text-body-secondary">${spinner}<span>${message}</span></div>`;
+  el("failurePatterns").innerHTML = `<div class="empty-state">${message}</div>`;
+}
+
+async function loadDashboard(params, signal) {
   const token = ++state.dashboardRequestToken;
-  const params = buildDashboardParams();
   let payload;
   try {
-    payload = await fetchJson(`/api/dashboard?${queryString(params)}`);
+    payload = await fetchJson(`/api/dashboard?${queryString(params)}`, signal);
   } catch (error) {
     if (token !== state.dashboardRequestToken) return false;
     throw error;
@@ -1051,10 +1108,15 @@ function renderDashboardPayload(payload) {
     from: timeFormat(payload.window.from_ts),
     to: timeFormat(payload.window.to_ts),
   });
+  renderRefreshStatus();
 }
 
 async function loadRecords(append = false) {
+  const params = buildRecordParams(append);
   const token = ++state.recordRequestToken;
+  state.recordRequestController?.abort();
+  const controller = new AbortController();
+  state.recordRequestController = controller;
   state.recordsLoading = true;
   const spinner = el("loadMoreSpinner");
   const loadMoreButton = el("loadMoreButton");
@@ -1071,7 +1133,7 @@ async function loadRecords(append = false) {
   }
 
   try {
-    const payload = await fetchJson(`/api/records?${queryString(buildRecordParams(append))}`);
+    const payload = await fetchJson(`/api/records?${queryString(params)}`, controller.signal);
     if (token !== state.recordRequestToken) return false;
     renderRecords(payload, append);
     state.recordsLoaded = true;
@@ -1081,6 +1143,7 @@ async function loadRecords(append = false) {
     throw error;
   } finally {
     if (token === state.recordRequestToken) {
+      state.recordRequestController = null;
       state.recordsLoading = false;
       spinner.classList.add("d-none");
       loadMoreButton.disabled = !state.nextCursorTs;
@@ -1091,29 +1154,68 @@ async function loadRecords(append = false) {
   }
 }
 
-async function refreshAll() {
+function refreshAll() {
+  const params = buildDashboardParams();
+  const key = queryString(params);
+  if (state.dashboardRequest?.key === key) return state.dashboardRequest.promise;
+  state.dashboardRequest?.controller.abort();
+  const controller = new AbortController();
+  const request = { key, controller, promise: null };
+  state.dashboardRequest = request;
   const token = ++state.refreshToken;
   hidePageError();
+  state.dashboardLoading = true;
+  state.dashboardSlow = false;
+  state.dashboardRefreshFailed = false;
   setRefreshLoading(true);
-  el("reportExportButton").disabled = true;
-  try {
-    const loaded = await loadDashboard();
-    if (token === state.refreshToken && loaded) {
+  el("reportExportButton").disabled = !state.dashboardPayload;
+  renderInitialReportState(true);
+  renderRefreshStatus();
+  const slowTimer = setTimeout(() => {
+    if (token !== state.refreshToken) return;
+    state.dashboardSlow = true;
+    renderRefreshStatus();
+  }, 4000);
+  request.promise = (async () => {
+    try {
+      const loaded = await loadDashboard(params, controller.signal);
+      if (token !== state.refreshToken || !loaded) return;
+      state.dashboardUpdatedAt = new Date();
       state.recordsLoaded = false;
       ++state.recordRequestToken;
+      state.recordRequestController?.abort();
+      state.recordRequestController = null;
       state.recordsLoading = false;
+      state.recordBaseParams = null;
       state.nextCursorTs = null;
       state.nextCursorId = null;
-      if (el("recordsDisclosure").open) await loadRecords(false);
-      el("lastUpdated").textContent = t("status.updatedAt", {
-        time: new Date().toLocaleTimeString(i18n.locale, { hour12: false }),
-      });
+      el("recordsTable").innerHTML = emptyRow(8, t("states.loading"));
+      state.renderedRecordCount = 0;
+      el("recordCount").textContent = "—";
+      el("loadMoreButton").disabled = true;
+      el("loadMoreButton").setAttribute("aria-busy", "false");
+      el("loadMoreSpinner").classList.add("d-none");
+      el("searchButton").disabled = false;
+      el("searchButton").setAttribute("aria-busy", "false");
+      if (el("recordsDisclosure").open) loadRecords(false).catch(showPageError);
+    } catch (error) {
+      if (token === state.refreshToken && error.name !== "AbortError") {
+        state.dashboardRefreshFailed = true;
+        showPageError(error);
+        renderInitialReportState(false);
+      }
+    } finally {
+      clearTimeout(slowTimer);
+      if (token === state.refreshToken) {
+        state.dashboardRequest = null;
+        state.dashboardLoading = false;
+        state.dashboardSlow = false;
+        setRefreshLoading(false);
+        renderRefreshStatus();
+      }
     }
-  } catch (error) {
-    if (token === state.refreshToken) showPageError(error);
-  } finally {
-    if (token === state.refreshToken) setRefreshLoading(false);
-  }
+  })();
+  return request.promise;
 }
 
 async function loadDetailById(id, pattern = null) {
@@ -1159,6 +1261,7 @@ el("dashboardFilter").addEventListener("submit", (event) => {
   event.preventDefault();
   refreshAll();
 });
+el("dashboardFilter").addEventListener("input", renderRefreshStatus);
 
 el("recordFilter").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -1192,6 +1295,8 @@ el("localeSelect").addEventListener("change", (event) => {
   if (!i18n.setLocale(event.target.value)) return;
   i18n.apply();
   if (state.dashboardPayload) renderDashboardPayload(state.dashboardPayload);
+  else renderInitialReportState(state.dashboardLoading);
+  renderRefreshStatus();
   if (el("recordsDisclosure").open) loadRecords(false).catch(showPageError);
 });
 

@@ -30,11 +30,21 @@ Web 分析页统一把 `status_code = 200` 视为成功，把 `status_code != 20
 - 默认只查最近 24 小时
 - 时间窗口有上限，避免无限制扫大表
 - 仪表盘接口走聚合查询，不拉全量明细
-- 仪表盘结果做短 TTL 内存缓存，降低重复查询压力
+- 仪表盘按周期和规范化筛选复用内存缓存，TTL 从计算完成后开始；同范围并发请求共用一次计算
 - 最近记录列表用游标翻页，不用高 offset
 - 列表接口只取摘要字段，详情页才查大字段
 - path 过滤用前缀匹配，尽量利用 `(path, request_ts)` 索引
 - 过期审计记录按 `request_ts` 索引小批量删除，避免单次大事务
+
+## 报告刷新与性能
+
+每份未缓存报告需要多项 MySQL 聚合，首次读取或缓存过期后仍取决于数据库速度。缓存键不含滚动时间桶，默认在一次完整计算结束后复用结果 15 秒；`LOGARK_ANALYTICS_CACHE_TTL_SECS=0` 关闭完成结果复用。同范围正在进行的计算仍会合并，浏览器离开或取消旧请求不会使其他等待者重新计算。缓存最多保留 64 个范围，完整报告并发按连接池大小限制为 1–2 份，避免每份报告的 9 个查询分支持续挤满连接池。
+
+`LOGARK_ANALYTICS_QUERY_TIMEOUT_SECS` 限制每份报告开始执行后的计算时间，默认 300 秒；超时会终止该计算并允许重试。服务日志按 `query`、`elapsed_ms`、`success` 记录各聚合项与整体计算，整体还记录 `queue_ms`；不会打印筛选值或审计正文。设置 `RUST_LOG=info,logark::service::dashboard_cache=debug` 可观察缓存命中与请求合并。
+
+P95 使用精确最近秩，按耗时降序读取 `OFFSET floor(N / 20)`，避免升序跳过约 95% 的结果。数据库仍可能扫描、排序整个窗口，不能将这个改动视为固定倍数的整体提速。
+
+刷新期间保留当前报告、导出及明细，界面标明已完成报告的实际范围；新报告返回后才切换范围。失败时也保留旧结果供查看与重试。相同筛选的进行中请求去重，切换范围取消旧 HTTP 等待，迟到响应不会覆盖新报告。缓存仅在服务进程内使用，不将审计数据写入浏览器持久存储，也不依赖 Redis。
 
 ## 典型失败与统计口径
 
@@ -94,7 +104,8 @@ cargo run --bin logark-tg-bot
 
 - `DATABASE_URL` MySQL 连接串
 - `LOGARK_DB_MAX_CONNECTIONS` 连接池大小
-- `LOGARK_ANALYTICS_CACHE_TTL_SECS` 仪表盘缓存秒数
+- `LOGARK_ANALYTICS_CACHE_TTL_SECS` 完整报告计算结束后的缓存秒数，默认 `15`
+- `LOGARK_ANALYTICS_QUERY_TIMEOUT_SECS` 完整报告计算超时，默认 `300` 秒，范围 `1–3600`
 - `LOGARK_DEFAULT_WINDOW_HOURS` 默认分析窗口
 - `LOGARK_MAX_WINDOW_HOURS` 最大分析窗口
 - `LOGARK_MAX_LIST_LIMIT` 单次最多返回多少条记录
