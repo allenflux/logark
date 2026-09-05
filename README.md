@@ -20,7 +20,7 @@ Web 分析页统一把 `status_code = 200` 视为成功，把 `status_code != 20
 - `GET /api/records/uuid/:uuid` 按 `uuid` 查询详情
 - `GET /health` 健康检查
 - MySQL `api_audit_log` 表初始化
-- `api_audit_log` 滚动 30 天自动清理
+- `api_audit_log` 滚动 14 天自动清理
 - Telegram Bot：`bid` 监控、日报和排名
 
 ## 为什么这样设计
@@ -40,11 +40,35 @@ Web 分析页统一把 `status_code = 200` 视为成功，把 `status_code != 20
 
 每份未缓存报告需要多项 MySQL 聚合，首次读取或缓存过期后仍取决于数据库速度。缓存键不含滚动时间桶，默认在一次完整计算结束后复用结果 15 秒；`LOGARK_ANALYTICS_CACHE_TTL_SECS=0` 关闭完成结果复用。同范围正在进行的计算仍会合并，浏览器离开或取消旧请求不会使其他等待者重新计算。缓存最多保留 64 个范围，完整报告并发按连接池大小限制为 1–2 份，避免每份报告的 9 个查询分支持续挤满连接池。
 
-`LOGARK_ANALYTICS_QUERY_TIMEOUT_SECS` 限制每份报告开始执行后的计算时间，默认 300 秒；超时会终止该计算并允许重试。服务日志按 `query`、`elapsed_ms`、`success` 记录各聚合项与整体计算，整体还记录 `queue_ms`；不会打印筛选值或审计正文。设置 `RUST_LOG=info,logark::service::dashboard_cache=debug` 可观察缓存命中与请求合并。
+`LOGARK_ANALYTICS_QUERY_TIMEOUT_SECS` 限制每份报告开始执行后的应用等待时间，默认 300 秒；超时会停止 Rust 计算任务并允许重试，已经提交的 SQL 可能继续在数据库执行。服务日志按 `query`、`elapsed_ms`、`success` 记录各聚合项与整体计算，整体还记录 `queue_ms`；不会打印筛选值或审计正文。设置 `RUST_LOG=info,logark::service::dashboard_cache=debug` 可观察缓存命中与请求合并。
 
-P95 使用精确最近秩，按耗时降序读取 `OFFSET floor(N / 20)`，避免升序跳过约 95% 的结果。数据库仍可能扫描、排序整个窗口，不能将这个改动视为固定倍数的整体提速。
+P95 使用精确最近秩：先按整数耗时统计频数，再按耗时降序累计，选择累计数量首次超过 `floor(N / 20)` 的耗时。计数与排名来自同一 SQL 快照，保留重复值，不做抽样或近似；排序面向频数组，不再通过 OFFSET 读取大量原始行。耗时几乎全部不同时，仍可能产生较大的临时表。
 
-刷新期间保留当前报告、导出及明细，界面标明已完成报告的实际范围；新报告返回后才切换范围。失败时也保留旧结果供查看与重试。相同筛选的进行中请求去重，切换范围取消旧 HTTP 等待，迟到响应不会覆盖新报告。缓存仅在服务进程内使用，不将审计数据写入浏览器持久存储，也不依赖 Redis。
+大表的首次查询依靠两个报表覆盖索引减少对请求/响应正文所在数据页的访问：`idx_report_summary` 覆盖汇总、时间序列和各维度所需字段，`idx_report_failures` 覆盖默认范围内的失败分组，再仅按代表 ID 读取少量样本。带 API Key 或任务类型筛选的失败分组可能仍需回表，原有选择性索引继续保留。
+
+任务类型汇总在没有指定任务类型时排除旧的 `idx_task_type_request_ts`，避免优化器仅因 `IS NOT NULL` 选择非覆盖索引、大量回表；明确筛选任务类型时仍允许使用该选择性索引。
+
+新数据库由 `001_init.sql` 创建这些索引；已有数据库需经容量检查后执行一次 [`migrations/002_report_indexes.sql`](migrations/002_report_indexes.sql)。该迁移使用 `ALGORITHM=INPLACE, LOCK=NONE`，不修改业务行；建立索引期间仍会增加 CPU、I/O 和临时空间占用。服务启动时不会自动运行这次大表索引构建。迁移文件同时列出仅删除新增索引的回滚 SQL。
+
+失败分组使用窗口统计，在一次 GROUP BY 后计算全窗口模式数与失败总数，再截取前 12 类；不再对同一窗口分组两次。此查询需要支持窗口函数的 MariaDB 10.2+ / MySQL 8.0+，已在 MariaDB 11.4 验证。可用 [`scripts/benchmark-report-indexes.py`](scripts/benchmark-report-indexes.py) 在自动清理的本机 MariaDB 容器中复现宽表基准、索引覆盖及结果一致性检查；不要将本机倍率视为线上性能保证。
+
+刷新期间保留当前报告、导出及明细，界面标明已完成报告的实际范围；新报告返回后才切换范围。失败时也保留旧结果供查看与重试。相同筛选的进行中请求去重，切换范围取消旧 HTTP 等待，迟到响应不会覆盖新报告；不将审计数据写入浏览器持久存储。
+
+### 可选 Redis 共享缓存
+
+设置 `LOGARK_REDIS_URL` 后，成功报告会进入 Redis，共享给后续请求和重新启动的服务实例。`LOGARK_REDIS_CACHE_TTL_SECS` 默认 60 秒，从计算完成起算；读取不续期，本机缓存命中 Redis 后只保留两级缓存剩余有效期的较小值。Redis 查询在数据库并发队列之前执行，缓存命中不会被其他筛选的慢 SQL 阻挡。Redis 操作默认最多等待 200 ms，由 `LOGARK_REDIS_OPERATION_TIMEOUT_MS` 控制；连接失败、超时或坏缓存均自动回退数据库。未配置连接或 Redis TTL 为 0 时保持仅内存缓存。
+
+缓存键包含版本、数据库身份与全部规范化筛选的 SHA-256 摘要，不包含明文 API Key。缓存值包含报告及其代表请求摘要，因此应使用私有连接配置；不缓存请求/响应正文。缓存最长可复用默认 60 秒，页面继续显示报告真实时间范围。首次计算、过期或 Redis 不可用时仍需查询数据库。
+
+把连接配置放在本机 `.env.redis`（已从 Git 和 Docker 构建上下文排除），例如 `LOGARK_REDIS_URL=redis://:URL编码后的密码@主机:端口/0`。本机启动先读取 `.env.redis` 再读取 `.env`，显式进程环境优先。Compose 部署时把私有配置单独放到应用服务器的项目目录，使用可选覆盖文件：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.redis.yml up -d --build logark-server
+```
+
+[`examples/report_probe.rs`](examples/report_probe.rs) 可通过 `cargo run --example report_probe -- 24` 检查真实报告计算与跨实例缓存耗时，只输出时间与汇总计数；它不会执行数据库迁移、记录清理或启动机器人，配置 Redis 时会写入正常的报告缓存。
+
+2026-09-05 实测：在线建立两条索引耗时 34.6 秒；24 小时约 95.6 万条请求，本机新版后端连接真实数据库的完整冷计算为 6.9–8.9 秒，另一个服务实例读取同一 Redis 报告为 26–29 ms。固定时间窗的 P95 新旧结果均为 465 ms，查询耗时由 10.3–14.3 秒降到 0.40 秒。这些是当时负载下的探针结果；线上旧后端仅加索引后的接口仍为 18.9–32.9 秒，必须部署新版后端才能使用查询改写和 Redis。冷计算仍受数据量与数据库负载影响。
 
 ## 典型失败与统计口径
 
@@ -110,7 +134,7 @@ cargo run --bin logark-tg-bot
 - `LOGARK_MAX_WINDOW_HOURS` 最大分析窗口
 - `LOGARK_MAX_LIST_LIMIT` 单次最多返回多少条记录
 - `LOGARK_SLOW_REQUEST_MS` 慢请求阈值，便于后续扩展
-- `LOGARK_AUDIT_RETENTION_DAYS` 审计日志保留天数，默认 `30`
+- `LOGARK_AUDIT_RETENTION_DAYS` 审计日志保留天数，默认 `14`
 - `LOGARK_AUDIT_CLEANUP_INTERVAL_SECS` 自动清理间隔，默认 `3600` 秒
 - `LOGARK_AUDIT_CLEANUP_BATCH_SIZE` 每批删除行数，默认 `1000`，最大 `10000`
 - `TG_BOT_TOKEN` Telegram 机器人 token
@@ -153,7 +177,7 @@ curl 'http://127.0.0.1:7700/api/records?hours=24&non_200=true&limit=20'
 `logark-server` 成功绑定监听端口后会自动启动清理任务：启动时立即执行一次，之后默认每小时执行。每轮固定计算一次边界，删除满足以下条件的记录：
 
 ```sql
-request_ts < 当前 UTC 毫秒时间 - 30 × 24 小时
+request_ts < 当前 UTC 毫秒时间 - 14 × 24 小时
 ```
 
 清理只作用于 `api_audit_log`，不会删除保存 Telegram 监控配置的 `tg_bid_watch`。删除按 `request_ts` 从旧到新每批自动提交，批间暂停 50 ms；每组最多执行 100 批，仍有积压时暂停 30 秒后继续追赶。单次失败只记录日志，HTTP 服务不会退出，并会在下一个周期重试。

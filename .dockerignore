@@ -2,4 +2,5 @@ target
 .git
 .DS_Store
 .env
+.env.redis
 docker-compose.yml

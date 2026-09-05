@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AuditRecordSummary {
     pub id: u64,
     pub request_id: String,
@@ -85,7 +85,7 @@ pub struct HealthResponse {
     pub latest_request_ts: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardResponse {
     pub window: DashboardWindow,
     pub summary: DashboardSummary,
@@ -100,7 +100,7 @@ pub struct DashboardResponse {
     pub latest_errors: Vec<AuditRecordSummary>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailurePattern {
     pub method: String,
     pub path: String,
@@ -117,11 +117,11 @@ pub struct FailurePattern {
     pub representative: AuditRecordSummary,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailurePatternCoverage {
-    pub aggregation_scope: &'static str,
+    pub aggregation_scope: String,
     /// String signature components are grouped bytewise, preserving case.
-    pub group_by: [&'static str; 4],
+    pub group_by: [String; 4],
     pub total_patterns: i64,
     pub returned_patterns: usize,
     pub returned_error_requests: i64,
@@ -131,10 +131,10 @@ pub struct FailurePatternCoverage {
     pub truncated: bool,
     pub limit: usize,
     /// Highest ID selects the newest ingested example, which can have an older request timestamp.
-    pub representative_strategy: &'static str,
+    pub representative_strategy: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardWindow {
     pub from_ts: i64,
     pub to_ts: i64,
@@ -142,7 +142,7 @@ pub struct DashboardWindow {
     pub hours: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardSummary {
     pub total_requests: i64,
     pub successful_requests: i64,
@@ -158,7 +158,7 @@ pub struct DashboardSummary {
     pub affected_paths: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelinePoint {
     pub ts: i64,
     pub count: i64,
@@ -167,13 +167,13 @@ pub struct TimelinePoint {
     pub error_rate: f64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricSlice {
     pub label: String,
     pub value: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorRateSlice {
     pub label: String,
     pub total_requests: i64,

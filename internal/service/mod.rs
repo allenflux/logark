@@ -1,8 +1,7 @@
 mod dashboard_cache;
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::Context;
 use dashboard_cache::DashboardCache;
 use sqlx::{MySql, MySqlPool, QueryBuilder, Row};
 
@@ -14,6 +13,7 @@ use crate::{
         ErrorRateSlice, FailurePattern, FailurePatternCoverage, MetricSlice, RecordListQuery,
         RecordListResponse, TimelinePoint,
     },
+    redis_cache::RedisReportCache,
 };
 
 #[derive(Clone)]
@@ -21,6 +21,7 @@ pub struct AuditAnalyticsService {
     pool: MySqlPool,
     config: Config,
     dashboard_cache: std::sync::Arc<DashboardCache<DashboardResponse>>,
+    redis_cache: Option<RedisReportCache>,
 }
 
 #[derive(Clone)]
@@ -62,10 +63,12 @@ impl AuditAnalyticsService {
         // reports as well as coalescing requests for the same filter.
         let concurrent_reports = (config.db_max_connections / 9).clamp(1, 2) as usize;
         let query_timeout = Duration::from_secs(config.analytics_query_timeout_secs);
+        let redis_cache = RedisReportCache::from_config(&config);
         Self {
             pool,
             config,
             dashboard_cache: DashboardCache::new(64, concurrent_reports, query_timeout),
+            redis_cache,
         }
     }
 
@@ -80,14 +83,29 @@ impl AuditAnalyticsService {
         let cache_key = dashboard_cache_key(&window, &filter);
         let ttl = Duration::from_secs(self.config.analytics_cache_ttl_secs);
         let service = self.clone();
+        let shared_cache = self.redis_cache.clone();
+        let shared_key = cache_key.clone();
         let payload = self
             .dashboard_cache
-            .get_or_load(cache_key, ttl, async move {
-                // Resolve time after queueing so a report always describes its
-                // actual computation window, not when a waiting client arrived.
-                let window = service.resolve_window(Some(window.hours));
-                service.compute_dashboard(&window, &filter).await
-            })
+            .get_or_load_with_cache(
+                cache_key.clone(),
+                async move {
+                    let cached = shared_cache?.get(&shared_key).await?;
+                    Some((cached.payload, ttl.min(cached.remaining_ttl)))
+                },
+                async move {
+                    // Resolve time after queueing so a report always describes its
+                    // actual computation window, not when a waiting client arrived.
+                    let window = service.resolve_window(Some(window.hours));
+                    let payload = service.compute_dashboard(&window, &filter).await?;
+                    let completed_at = SystemTime::now();
+                    let completed_instant = Instant::now();
+                    if let Some(redis) = &service.redis_cache {
+                        redis.put(&cache_key, &payload, completed_at).await;
+                    }
+                    Ok((payload, ttl.saturating_sub(completed_instant.elapsed())))
+                },
+            )
             .await?;
         Ok((*payload).clone())
     }
@@ -510,28 +528,13 @@ impl AuditAnalyticsService {
             return Ok(0);
         }
 
-        // The exact nearest-rank P95 is ceil(19N / 20) in ascending order.
-        // Reading descending instead skips N - ceil(19N / 20) = floor(N / 20)
-        // rows. This requests roughly the first 5% instead of 95% of the sorted
-        // window; the database can still need to scan and sort the full window.
-        let offset = p95_descending_offset(total_requests);
-        let mut qb: QueryBuilder<MySql> =
-            QueryBuilder::new("SELECT duration_ms FROM api_audit_log WHERE request_ts BETWEEN ");
-        qb.push_bind(window.from_ts)
-            .push(" AND ")
-            .push_bind(window.to_ts);
-        push_common_filters(&mut qb, filter);
-        qb.push(" ORDER BY duration_ms DESC LIMIT 1 OFFSET ")
-            .push_bind(offset);
-
         let started_at = Instant::now();
         let result: anyhow::Result<i32> = async {
-            let row = qb
-                .build()
+            Ok(p95_duration_query(window, filter)
+                .build_query_scalar::<i32>()
                 .fetch_optional(&self.pool)
                 .await?
-                .context("p95 row missing")?;
-            Ok(row.try_get("duration_ms")?)
+                .unwrap_or(0))
         }
         .await;
         tracing::info!(
@@ -714,8 +717,18 @@ impl AuditAnalyticsService {
             .push(
                 " AS label, CAST(COUNT(*) AS SIGNED) AS total_requests, \
                  CAST(COALESCE(SUM(CASE WHEN status_code <> 200 THEN 1 ELSE 0 END), 0) AS SIGNED) AS error_requests \
-                 FROM api_audit_log WHERE request_ts BETWEEN ",
+                 FROM api_audit_log",
             )
+            // Without an explicit task-type filter, MariaDB can choose the
+            // old non-covering task-type index just for IS NOT NULL, reading
+            // the wide audit rows even when a report covering index exists.
+            // Keep that selective index available when a task type is chosen.
+            .push(if column == "task_type" && filter.task_type.is_none() {
+                " IGNORE INDEX (idx_task_type_request_ts)"
+            } else {
+                ""
+            })
+            .push(" WHERE request_ts BETWEEN ")
             .push_bind(window.from_ts)
             .push(" AND ")
             .push_bind(window.to_ts)
@@ -793,8 +806,31 @@ impl AuditAnalyticsService {
     }
 }
 
-fn p95_descending_offset(total_requests: i64) -> i64 {
-    total_requests.max(0) / 20
+fn p95_duration_query<'a>(
+    window: &AnalyticsWindow,
+    filter: &'a CommonFilter,
+) -> QueryBuilder<'a, MySql> {
+    // Group equal integer durations before sorting. The descending nearest
+    // rank is floor(N / 20) + 1, so choose the first frequency bucket whose
+    // cumulative count exceeds floor(N / 20). This remains exact, including
+    // ties, and avoids OFFSET retrieving tens of thousands of wide audit rows.
+    // Both N and the cumulative counts use this statement's snapshot.
+    let mut qb = QueryBuilder::new(
+        "SELECT duration_ms FROM (SELECT duration_ms, \
+         SUM(COUNT(*)) OVER (ORDER BY duration_ms DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_count, \
+         SUM(COUNT(*)) OVER () AS total_count \
+         FROM api_audit_log WHERE request_ts BETWEEN ",
+    );
+    qb.push_bind(window.from_ts)
+        .push(" AND ")
+        .push_bind(window.to_ts);
+    push_common_filters(&mut qb, filter);
+    qb.push(
+        " GROUP BY duration_ms) AS histogram \
+         WHERE cumulative_count > FLOOR(total_count / 20) \
+         ORDER BY duration_ms DESC LIMIT 1",
+    );
+    qb
 }
 
 fn failure_patterns_query<'a>(
@@ -802,6 +838,8 @@ fn failure_patterns_query<'a>(
     filter: &'a CommonFilter,
 ) -> QueryBuilder<'a, MySql> {
     // Aggregate the entire filtered window before applying the display limit.
+    // Window totals operate on those groups before LIMIT, avoiding a second
+    // scan/group of the audit table while preserving one statement snapshot.
     // Joining MAX(id) retrieves one newest-ingested example per pattern without
     // fetching request/response bodies, relying on GROUP_CONCAT, or using N+1 queries.
     let mut qb = QueryBuilder::new(
@@ -810,7 +848,7 @@ fn failure_patterns_query<'a>(
          sample.task_id, sample.task_type, sample.error_code, \
          patterns.normalized_error_code, patterns.count, patterns.first_seen_ts, \
          patterns.last_seen_ts, patterns.avg_duration_ms, patterns.max_duration_ms, \
-         totals.total_patterns, totals.total_error_requests \
+         patterns.total_patterns, patterns.total_error_requests \
          FROM (SELECT MIN(method) AS method, MIN(path) AS path, status_code, MIN(",
     );
     qb.push(FAILURE_PATTERN_ERROR_CODE).push(
@@ -819,7 +857,9 @@ fn failure_patterns_query<'a>(
          CAST(MAX(request_ts) AS SIGNED) AS last_seen_ts, \
          CAST(AVG(duration_ms) AS DOUBLE) AS avg_duration_ms, \
          CAST(MAX(duration_ms) AS SIGNED) AS max_duration_ms, \
-         MAX(id) AS representative_id",
+         MAX(id) AS representative_id, \
+         CAST(COUNT(*) OVER () AS SIGNED) AS total_patterns, \
+         CAST(SUM(COUNT(*)) OVER () AS SIGNED) AS total_error_requests",
     );
     push_failure_pattern_grouping(&mut qb, window, filter);
     qb.push(
@@ -827,28 +867,12 @@ fn failure_patterns_query<'a>(
          status_code ASC, BINARY MIN(NULLIF(TRIM(error_code), '')) ASC LIMIT ",
     )
     .push_bind(FAILURE_PATTERN_LIMIT as i64)
-    .push(") AS patterns CROSS JOIN (");
-    push_failure_pattern_totals(&mut qb, window, filter);
-    qb.push(
-        ") AS totals INNER JOIN api_audit_log AS sample ON sample.id = patterns.representative_id \
+    .push(
+        ") AS patterns INNER JOIN api_audit_log AS sample ON sample.id = patterns.representative_id \
          ORDER BY patterns.count DESC, patterns.last_seen_ts DESC, BINARY patterns.method ASC, \
          BINARY patterns.path ASC, patterns.status_code ASC, BINARY patterns.normalized_error_code ASC",
     );
     qb
-}
-
-fn push_failure_pattern_totals<'a>(
-    qb: &mut QueryBuilder<'a, MySql>,
-    window: &AnalyticsWindow,
-    filter: &'a CommonFilter,
-) {
-    qb.push(
-        "SELECT CAST(COUNT(*) AS SIGNED) AS total_patterns, \
-         CAST(COALESCE(SUM(patterns.count), 0) AS SIGNED) AS total_error_requests \
-         FROM (SELECT COUNT(*) AS count",
-    );
-    push_failure_pattern_grouping(qb, window, filter);
-    qb.push(") AS patterns");
 }
 
 fn push_failure_pattern_grouping<'a>(
@@ -875,8 +899,8 @@ fn failure_pattern_coverage(
 ) -> FailurePatternCoverage {
     let returned_error_requests = patterns.iter().map(|pattern| pattern.count).sum();
     FailurePatternCoverage {
-        aggregation_scope: "full_filtered_window",
-        group_by: ["method", "path", "status_code", "error_code"],
+        aggregation_scope: "full_filtered_window".into(),
+        group_by: ["method", "path", "status_code", "error_code"].map(str::to_owned),
         total_patterns,
         returned_patterns: patterns.len(),
         returned_error_requests,
@@ -884,7 +908,7 @@ fn failure_pattern_coverage(
         covered_error_rate: percentage(returned_error_requests, total_error_requests),
         truncated: total_patterns > patterns.len() as i64,
         limit: FAILURE_PATTERN_LIMIT,
-        representative_strategy: "highest_id_per_pattern",
+        representative_strategy: "highest_id_per_pattern".into(),
     }
 }
 
@@ -986,34 +1010,67 @@ mod tests {
         assert!((percentage(8, 8) - 100.0).abs() < f64::EPSILON);
     }
 
-    #[test]
-    fn descending_p95_matches_nearest_rank_for_small_and_duplicate_samples() {
-        for size in [1usize, 2, 19, 20, 21, 39, 40, 41, 99, 100, 101, 1_001] {
-            // Duplicated, initially unordered durations exercise tie handling.
-            let mut durations: Vec<_> = (0..size)
-                .map(|index| ((index * 37 + 11) % 127) as i32)
-                .collect();
-            durations.sort_unstable();
-            let nearest_rank = (19 * size).div_ceil(20);
-            let expected = durations[nearest_rank - 1];
-            let old_ascending_offset = ((size as f64) * 0.95).ceil() as usize - 1;
-            assert_eq!(durations[old_ascending_offset], expected);
-
-            durations.reverse();
-            let offset = p95_descending_offset(size as i64) as usize;
-            assert_eq!(durations[offset], expected, "sample size {size}");
+    #[tokio::test]
+    #[ignore = "requires LOGARK_TEST_DATABASE_URL pointing to a disposable MariaDB instance"]
+    async fn p95_histogram_matches_exact_rank_for_empty_tied_and_boundary_samples(
+    ) -> anyhow::Result<()> {
+        use sqlx::{Connection, MySqlConnection};
+        let url = std::env::var("LOGARK_TEST_DATABASE_URL")?;
+        let mut connection = MySqlConnection::connect(&url).await?;
+        sqlx::query("SET SESSION sql_mode = CONCAT(@@sql_mode, ',ONLY_FULL_GROUP_BY')")
+            .execute(&mut connection)
+            .await?;
+        sqlx::query(
+            "CREATE TEMPORARY TABLE api_audit_log (
+            request_ts BIGINT NOT NULL DEFAULT 1000, duration_ms INT NOT NULL,
+            path VARCHAR(255) DEFAULT '/v1/generate', method VARCHAR(16) DEFAULT 'POST',
+            api_key VARCHAR(255) DEFAULT 'test-key', task_type VARCHAR(128) DEFAULT 'generation'
+        )",
+        )
+        .execute(&mut connection)
+        .await?;
+        let mut cases: Vec<Vec<i32>> = [0usize, 1, 2, 19, 20, 21, 39, 40, 41, 99, 100, 101, 1001]
+            .into_iter()
+            .map(|size| (0..size).map(|i| ((i * 37 + 11) % 127) as i32).collect())
+            .collect();
+        cases.push(vec![42; 100]);
+        cases.push(vec![i32::MIN, 0, 0, i32::MAX]);
+        for mut values in cases {
+            sqlx::query("DELETE FROM api_audit_log")
+                .execute(&mut connection)
+                .await?;
+            if !values.is_empty() {
+                let mut insert =
+                    QueryBuilder::<MySql>::new("INSERT INTO api_audit_log (duration_ms) ");
+                insert.push_values(&values, |mut row, value| {
+                    row.push_bind(*value);
+                });
+                insert.build().execute(&mut connection).await?;
+            }
+            values.sort_unstable();
+            let expected = if values.is_empty() {
+                None
+            } else {
+                Some(values[(19 * values.len()).div_ceil(20) - 1])
+            };
+            let actual = p95_duration_query(&test_window(), &test_filter())
+                .build_query_scalar::<i32>()
+                .fetch_optional(&mut connection)
+                .await?;
+            assert_eq!(actual, expected, "sample size {}", values.len());
+            let missing = CommonFilter {
+                api_key: Some("absent-key".into()),
+                ..test_filter()
+            };
+            assert_eq!(
+                p95_duration_query(&test_window(), &missing)
+                    .build_query_scalar::<i32>()
+                    .fetch_optional(&mut connection)
+                    .await?,
+                None
+            );
         }
-    }
-
-    #[test]
-    fn descending_p95_offset_preserves_exact_rank_without_float_or_overflow() {
-        for total in [1i64, 19, 20, 21, 100, (1i64 << 53) + 19, i64::MAX] {
-            let ascending_rank = (19 * i128::from(total) + 19) / 20;
-            let descending_offset = i128::from(p95_descending_offset(total));
-            assert_eq!(i128::from(total) - descending_offset, ascending_rank);
-        }
-        assert_eq!(p95_descending_offset(0), 0);
-        assert_eq!(p95_descending_offset(-1), 0);
+        Ok(())
     }
 
     #[test]
@@ -1097,6 +1154,10 @@ mod tests {
 
         assert!(group_at < limit_at);
         assert_eq!(sql.matches(" LIMIT ").count(), 1);
+        assert_eq!(sql.matches(" GROUP BY ").count(), 1);
+        assert_eq!(sql.matches(" FROM api_audit_log ").count(), 1);
+        assert!(sql.contains("CAST(COUNT(*) OVER () AS SIGNED) AS total_patterns"));
+        assert!(sql.contains("CAST(SUM(COUNT(*)) OVER () AS SIGNED) AS total_error_requests"));
         assert!(sql.contains("MAX(id) AS representative_id"));
         assert!(sql.contains("sample.id = patterns.representative_id"));
         assert!(!sql.contains("request_body"));
@@ -1109,17 +1170,13 @@ mod tests {
         let window = test_window();
         let filter = test_filter();
         let patterns = failure_patterns_query(&window, &filter);
-        let mut totals = QueryBuilder::new("");
-        push_failure_pattern_totals(&mut totals, &window, &filter);
         let expected_grouping = " FROM api_audit_log WHERE request_ts BETWEEN ? AND ? \
             AND status_code <> 200 AND path LIKE CONCAT(?, '%') AND method = ? \
             AND api_key = ? AND task_type = ? GROUP BY BINARY method, BINARY path, status_code, \
             BINARY NULLIF(TRIM(error_code), '')";
 
         assert!(patterns.sql().contains(expected_grouping));
-        assert_eq!(patterns.sql().matches(expected_grouping).count(), 2);
-        assert!(totals.sql().contains(expected_grouping));
-        assert!(!totals.sql().contains(" LIMIT "));
+        assert_eq!(patterns.sql().matches(expected_grouping).count(), 1);
         assert!(!patterns.sql().contains("status_code >= 400"));
         assert!(patterns
             .sql()
@@ -1231,6 +1288,9 @@ mod tests {
         assert_eq!(rows.len(), FAILURE_PATTERN_LIMIT);
         assert_eq!(rows[0].total_patterns, 19);
         assert_eq!(rows[0].total_error_requests, 37);
+        assert!(rows
+            .iter()
+            .all(|row| row.total_patterns == 19 && row.total_error_requests == 37));
         assert_eq!(rows[0].count, 18);
         assert_eq!(rows[0].normalized_error_code, None);
         assert_eq!(rows[0].first_seen_ts, 1_000);
@@ -1254,6 +1314,9 @@ mod tests {
         assert_eq!(earlier.len(), 6);
         assert!(earlier
             .iter()
+            .all(|row| row.total_patterns == 6 && row.total_error_requests == 24));
+        assert!(earlier
+            .iter()
             .any(|row| row.representative.path == "/v1/Generate"));
         assert!(earlier
             .iter()
@@ -1264,6 +1327,42 @@ mod tests {
         assert!(earlier
             .iter()
             .any(|row| row.representative.status_code == 302));
+
+        // Removing filters must change the complete-window totals, while the
+        // same signature still combines records from different keys/task types.
+        let unfiltered = CommonFilter {
+            path: None,
+            method: None,
+            api_key: None,
+            task_type: None,
+        };
+        let all = failure_patterns_query(&window, &unfiltered)
+            .build_query_as::<FailurePatternRow>()
+            .fetch_all(&mut connection)
+            .await?;
+        assert_eq!(all.len(), FAILURE_PATTERN_LIMIT);
+        assert!(all
+            .iter()
+            .all(|row| row.total_patterns == 21 && row.total_error_requests == 41));
+        assert_eq!(all[0].count, 20);
+        assert_eq!(
+            all[0].representative.task_type.as_deref(),
+            Some("other-task")
+        );
+
+        let single_window = AnalyticsWindow {
+            from_ts: 2_003,
+            to_ts: 2_003,
+            ..window.clone()
+        };
+        let single = failure_patterns_query(&single_window, &filter)
+            .build_query_as::<FailurePatternRow>()
+            .fetch_all(&mut connection)
+            .await?;
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].total_patterns, 1);
+        assert_eq!(single[0].total_error_requests, 1);
+        assert_eq!(single[0].normalized_error_code.as_deref(), Some("timeout"));
 
         let empty_filter = CommonFilter {
             path: Some("/v1/success".into()),

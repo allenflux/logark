@@ -1,0 +1,6 @@
+# Optional shared report cache. Keep credentials in the ignored .env.redis file.
+# docker compose -f docker-compose.yml -f docker-compose.redis.yml up -d --build logark-server
+services:
+  logark-server:
+    env_file:
+      - .env.redis

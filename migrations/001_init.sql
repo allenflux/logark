@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS api_audit_log (
     KEY idx_uuid (uuid),
     KEY idx_task_type_request_ts (task_type, request_ts),
     KEY idx_bid (bid),
-    KEY idx_request_id (request_id)
+    KEY idx_request_id (request_id),
+    KEY idx_report_summary (request_ts, status_code, duration_ms, path, api_key, task_id, task_type, method),
+    KEY idx_report_failures (request_ts, status_code, duration_ms, path, method, error_code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS tg_bid_watch (

@@ -8,6 +8,8 @@ pub mod db;
 pub mod handler;
 #[path = "../internal/model/mod.rs"]
 pub mod model;
+#[path = "../internal/redis_cache/mod.rs"]
+pub mod redis_cache;
 #[path = "../internal/retention/mod.rs"]
 pub mod retention;
 #[path = "../internal/service/mod.rs"]

@@ -18,6 +18,8 @@ thiserror = "1"
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 dotenvy = "0.15"
+redis = { version = "1", default-features = false, features = ["tokio-comp"] }
+sha2 = "0.10"
 
 [[bin]]
 name = "logark-server"

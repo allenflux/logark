@@ -8,6 +8,9 @@ pub struct Config {
     pub db_max_connections: u32,
     pub analytics_cache_ttl_secs: u64,
     pub analytics_query_timeout_secs: u64,
+    pub redis_url: Option<String>,
+    pub redis_cache_ttl_secs: u64,
+    pub redis_operation_timeout_ms: u64,
     pub default_window_hours: u32,
     pub max_window_hours: u32,
     pub max_list_limit: u32,
@@ -26,6 +29,9 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
+        // Optional local Redis credentials stay separate from tracked examples.
+        // dotenvy never overwrites values explicitly supplied by the process.
+        let _ = dotenvy::from_filename(".env.redis");
         let _ = dotenvy::dotenv();
         Ok(Self {
             addr: env::var("LOGARK_ADDR").unwrap_or_else(|_| "0.0.0.0:7700".to_string()),
@@ -38,11 +44,19 @@ impl Config {
                 1,
                 3_600,
             )?,
+            redis_url: env_opt("LOGARK_REDIS_URL").or_else(|| env_opt("REDIS_URL")),
+            redis_cache_ttl_secs: env_u64_in_range("LOGARK_REDIS_CACHE_TTL_SECS", 60, 0, 3_600)?,
+            redis_operation_timeout_ms: env_u64_in_range(
+                "LOGARK_REDIS_OPERATION_TIMEOUT_MS",
+                200,
+                10,
+                5_000,
+            )?,
             default_window_hours: env_u32("LOGARK_DEFAULT_WINDOW_HOURS", 24),
             max_window_hours: env_u32("LOGARK_MAX_WINDOW_HOURS", 168),
             max_list_limit: env_u32("LOGARK_MAX_LIST_LIMIT", 100),
             slow_request_ms: env_i32("LOGARK_SLOW_REQUEST_MS", 1000),
-            audit_retention_days: env_u32_in_range("LOGARK_AUDIT_RETENTION_DAYS", 30, 1, 3_650)?,
+            audit_retention_days: env_u32_in_range("LOGARK_AUDIT_RETENTION_DAYS", 14, 1, 3_650)?,
             audit_cleanup_interval_secs: env_u64_in_range(
                 "LOGARK_AUDIT_CLEANUP_INTERVAL_SECS",
                 3_600,

@@ -10,7 +10,7 @@ use tokio::{
 use crate::config::Config;
 
 const MILLIS_PER_DAY: i64 = 86_400_000;
-const DEFAULT_RETENTION_DAYS: u32 = 30;
+const DEFAULT_RETENTION_DAYS: u32 = 14;
 const DEFAULT_INTERVAL_SECS: u64 = 3_600;
 const DEFAULT_BATCH_SIZE: u32 = 1_000;
 const MAX_BATCHES_PER_RUN: u32 = 100;
@@ -225,9 +225,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cutoff_keeps_exactly_thirty_days() {
-        let now_ms = 40 * MILLIS_PER_DAY;
-        assert_eq!(retention_cutoff_ms(now_ms, 30), 10 * MILLIS_PER_DAY);
+    fn cutoff_keeps_exactly_fourteen_days() {
+        let now_ms = 1_783_123_456_789;
+        let cutoff_ms = retention_cutoff_ms(now_ms, DEFAULT_RETENTION_DAYS);
+        assert_eq!(now_ms - cutoff_ms, 14 * MILLIS_PER_DAY);
     }
 
     #[test]
