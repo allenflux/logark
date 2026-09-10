@@ -43,7 +43,7 @@ for (const locale of ["zh-CN", "en"]) {
   requireCondition(missing.length === 0, `${locale} is missing translations: ${missing.join(", ")}`);
   i18n.setLocale(locale);
   for (const key of keyAnalysisKeys) {
-    const text = i18n.t(key, { shown: 5, total: 20, errors: 12, all: 18, share: "66.7%", rate: "20%", count: 12, signature: "POST /fixture · HTTP 429 · RATE_LIMIT" });
+    const text = i18n.t(key, { shown: 5, total: 20, errors: 12, all: 18, share: "66.7%", rate: "20%", count: 12, seconds: 5, signature: "POST /fixture · HTTP 429 · RATE_LIMIT" });
     requireCondition(text.trim() && text !== key && !/\{[a-zA-Z0-9_]+\}/.test(text), `${locale}: ${key} must resolve all variables`);
     if (locale === "en") requireCondition(!/[\p{Script=Han}]/u.test(text), `${key} is not translated into English`);
   }

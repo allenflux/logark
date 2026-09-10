@@ -87,6 +87,7 @@ function gateResponse(pathname, match = () => true) {
 const injection = '/api/' + 'long-path-'.repeat(60) + '<img src=x onerror="window.__reportInjection=true">';
 const hostileKey = 'fixture-long-plaintext-key-'.repeat(12) + '\"><img src=x onerror="window.__apiKeyInjection=true">';
 const routeDetailRecords = new Map();
+const routeRecordBases = new Map();
 function keyRouteErrors(url) {
   const apiKey = url.searchParams.get("api_key");
   const path = url.searchParams.get("path");
@@ -94,13 +95,20 @@ function keyRouteErrors(url) {
   const taskType = url.searchParams.get("task_type");
   const selected = dashboard(url).api_key_analysis.keys.find((key) => key.api_key === apiKey)?.routes.find((route) => route.path === path);
   const totalErrors = selected?.error_requests ?? 120;
-  const counts = [Math.ceil(totalErrors * .6), Math.floor(totalErrors * .2), Math.floor(totalErrors * .1)];
-  const routePatterns = ["QUOTA_EXCEEDED", "UPSTREAM_TIMEOUT", "INVALID_PARAMETER"].map((code, index) => {
-    const representative = { ...summaries[index], id: 2203 - index, request_id: `scoped-request-${2203 - index}`,
+  const many = scenario === "manyRouteErrors";
+  const counts = many ? [24, 20, 16, 12, 10, 8, 6, 5, 4, 3, 2, 1]
+    : [Math.ceil(totalErrors * .6), Math.floor(totalErrors * .2), Math.floor(totalErrors * .1)];
+  const codes = many ? Array.from({ length: 12 }, (_, index) => `FAILURE_TYPE_${String(index + 1).padStart(2, "0")}`)
+    : ["QUOTA_EXCEEDED", "UPSTREAM_TIMEOUT", "INVALID_PARAMETER"];
+  const identity = JSON.stringify([apiKey, path, method, taskType]);
+  if (!routeRecordBases.has(identity)) routeRecordBases.set(identity, 2203 + routeRecordBases.size * 100);
+  const recordBase = routeRecordBases.get(identity);
+  const routePatterns = codes.map((code, index) => {
+    const representative = { ...summaries[index % summaries.length], id: recordBase - index, request_id: `scoped-request-${recordBase - index}`,
       api_key: apiKey, path, method: method || "POST", task_type: taskType || "image",
-      status_code: [429, 504, 400][index], error_code: scenario === "hostile" && index === 0 ? injection : code };
+      status_code: [429, 504, 400][index % 3], error_code: scenario === "hostile" && index === 0 ? injection : code };
     routeDetailRecords.set(representative.id, representative);
-    return { ...patterns[index], path, method: representative.method, status_code: representative.status_code,
+    return { ...patterns[index % patterns.length], path, method: representative.method, status_code: representative.status_code,
       error_code: representative.error_code, count: counts[index], error_share: counts[index] / totalErrors * 100, representative };
   }).filter((pattern) => pattern.count > 0);
   const returnedErrors = counts.reduce((sum, count) => sum + count, 0);
@@ -186,7 +194,11 @@ const server = createServer(async (request, response) => {
     if (!record) return json({ error: "Fixture record missing" }, 404);
     return json({ ...record, response_ts: record.request_ts + record.duration_ms, query_string: "fixture=true", uuid: "fixture-uuid",
       request_headers_json: '{"content-type":"application/json"}', response_headers_json: '{"retry-after":"30"}',
-      request_body: '{"task":"fixture"}', response_body: JSON.stringify({ error: record.error_code, message: "Representative failure response" }),
+      request_body: JSON.stringify({ task: "fixture", request_id: record.request_id, marker: "REQUEST_BODY_END" }),
+      response_body: JSON.stringify({ error: record.error_code, message: "Representative failure response",
+        ...(scenario === "manyRouteErrors" ? { details: Array.from({ length: 90 }, (_, index) => ({
+          field: `parameter_${index}`, reason: `Validation error ${index}: ` + "long-response-content-".repeat(12),
+        })), marker: "RESPONSE_BODY_END", literal: '<img src=x onerror="window.__sampleInjection=true">' } : {}) }),
       request_body_size: 18, response_body_size: 88, request_body_truncated: false, response_body_truncated: false });
   }
   const name = url.pathname === "/" ? "index.html" : url.pathname.replace(/^\/assets\//, "");
@@ -207,6 +219,7 @@ const browserErrors = [];
 const recordsRequests = () => requests.filter((url) => url.pathname === "/api/records");
 const dashboardRequests = () => requests.filter((url) => url.pathname === "/api/dashboard");
 const keyRouteRequests = () => requests.filter((url) => url.pathname === "/api/key-route-errors");
+const sampleRequests = () => requests.filter((url) => /^\/api\/records\/\d+$/.test(url.pathname));
 async function ready(page) {
   try {
     await page.waitForFunction(() => document.querySelector("#refreshButton")?.getAttribute("aria-busy") === "false");
@@ -216,9 +229,9 @@ async function ready(page) {
   }
   await page.evaluate(() => window.LogArkAnalytics.ready);
 }
-async function openPage({ mode = "report", mobile = false, blockWasm = false, waitForReport = true, missingKeyTranslations = false } = {}) {
+async function openPage({ mode = "report", mobile = false, viewport, blockWasm = false, waitForReport = true, missingKeyTranslations = false } = {}) {
   scenario = mode;
-  const context = await browser.newContext({ viewport: mobile ? { width: 390, height: 844 } : { width: 1440, height: 1100 },
+  const context = await browser.newContext({ viewport: viewport || (mobile ? { width: 390, height: 844 } : { width: 1440, height: 1100 }),
     locale: "zh-CN", reducedMotion: "reduce", acceptDownloads: true });
   const page = await context.newPage();
   page.on("pageerror", (error) => browserErrors.push(error.message));
@@ -260,54 +273,119 @@ async function keyAnalysisTranslations(page, locale) {
   if (locale === "en") assert.ok(!/[\p{Script=Han}]/u.test(section), "English key analysis must include translated dynamic labels and route coverage");
 }
 
+async function closeRouteDialog(page) {
+  if (await page.locator("#keyRouteDialog").isVisible()) {
+    await page.locator("[data-key-route-close]").first().click();
+    await page.locator("#keyRouteDialog").waitFor({ state: "hidden" });
+  }
+}
+async function boundedRouteDialog(page, label) {
+  const geometry = await page.locator("#keyRouteDialog").evaluate((dialog) => {
+    const box = dialog.getBoundingClientRect();
+    return { left: box.left, top: box.top, right: box.right, bottom: box.bottom,
+      viewportWidth: innerWidth, viewportHeight: innerHeight,
+      clientWidth: dialog.clientWidth, scrollWidth: dialog.scrollWidth };
+  });
+  assert.ok(geometry.left >= -1 && geometry.top >= -1 && geometry.right <= geometry.viewportWidth + 1
+    && geometry.bottom <= geometry.viewportHeight + 1, `${label}: dialog must fit its viewport: ${JSON.stringify(geometry)}`);
+  assert.ok(geometry.scrollWidth <= geometry.clientWidth + 1, `${label}: dialog content must wrap instead of overflowing horizontally`);
+  await noOverflow(page, label);
+}
 async function keyRouteDrilldownChecks() {
   const beforeInitialLoad = keyRouteRequests().length;
-  const { page, context } = await openPage();
+  const beforeInitialSamples = sampleRequests().length;
+  const { page, context } = await openPage({ viewport: { width: 1200, height: 800 } });
+  const dialog = page.locator("#keyRouteDialog");
   const toggle = (index) => page.locator(`[data-key-route-index="${index}"]`);
   const panel = (index) => page.locator(`#keyRouteErrors-${index}`);
-  const samples = (index) => panel(index).locator("[data-key-route-sample]");
-  const complete = async (index) => samples(index).first().waitFor({ state: "visible" });
+  const choices = (index) => panel(index).locator("[data-key-route-pattern]");
+  const complete = async (index) => choices(index).first().waitFor({ state: "visible" });
+  const open = async (index) => { await closeRouteDialog(page); await toggle(index).click(); };
+  const body = page.locator("#keyRouteSampleBody");
   assert.equal(keyRouteRequests().length, beforeInitialLoad, "initial reporting must not eagerly calculate per-route error details");
+  assert.equal(sampleRequests().length, beforeInitialSamples, "representative bodies must remain lazy until a route opens");
   await page.locator('#apiKeyRanking [data-key-index="1"]').click();
   const reportsBeforeExpansion = dashboardRequests().length;
   await toggle(0).focus();
+  const reportScrollBeforeOpen = await page.evaluate(() => scrollY);
   await toggle(0).press("Enter");
   await complete(0);
   assert.equal(await toggle(0).getAttribute("aria-expanded"), "true", "route drilldown is keyboard accessible");
-  assert.equal(await samples(0).count(), 3, "all returned ranked error types expose a representative request");
+  assert.equal(await toggle(0).getAttribute("aria-controls"), "keyRouteDialog");
+  assert.equal(await dialog.evaluate((node) => node.matches(":modal")), true, "rankings open in a native modal instead of the narrow report column");
+  assert.equal(await choices(0).count(), 3, "all returned ranked error types remain selectable");
   assert.deepEqual(Object.fromEntries(keyRouteRequests().at(-1).searchParams), {
     api_key: privateKey, path: apiKeyAnalysis.keys[1].routes[0].path, from_ts: String(start), to_ts: String(end),
-  }, "the route query must use the selected plaintext key, exact route, and the completed report's absolute time window");
+  }, "the route query uses the exact key, route, and completed report's absolute time window");
   const firstPanelText = await panel(0).textContent();
   for (const value of ["QUOTA_EXCEEDED", "UPSTREAM_TIMEOUT", "INVALID_PARAMETER", "72", "24", "12"]) {
     assert.ok(firstPanelText.includes(value), `ranked route errors must show ${value}`);
   }
-  assert.match(firstPanelText, /108\s*\/\s*120/, "route error coverage must use all failures for this key and route");
+  assert.match(firstPanelText, /108\s*\/\s*120/, "coverage uses all failures for this key and route");
   assert.ok(firstPanelText.indexOf("QUOTA_EXCEEDED") < firstPanelText.indexOf("UPSTREAM_TIMEOUT")
-    && firstPanelText.indexOf("UPSTREAM_TIMEOUT") < firstPanelText.indexOf("INVALID_PARAMETER"), "error ranking preserves descending occurrence counts");
-  await samples(0).first().click();
-  await page.locator("#responseBody").filter({ hasText: "QUOTA_EXCEEDED" }).waitFor({ state: "visible" });
-  assert.ok((await page.locator("#detailMeta").textContent()).includes(privateKey));
-  assert.ok((await page.locator("#detailMeta").textContent()).includes("scoped-request-2203"),
-    "representative details must load the scoped route record, not a global failure sample");
-  assert.match(await page.locator("#detailPatternContext").textContent(), /72/);
-  await page.locator("#detailModal [data-bs-dismiss=modal]").click();
-  await page.locator("#detailModal").waitFor({ state: "hidden" });
+    && firstPanelText.indexOf("UPSTREAM_TIMEOUT") < firstPanelText.indexOf("INVALID_PARAMETER"), "error choices preserve descending occurrence counts");
+  await body.filter({ hasText: "QUOTA_EXCEEDED" }).waitFor({ state: "visible" });
+  assert.ok((await dialog.textContent()).includes(privateKey));
+  assert.ok((await dialog.textContent()).includes("scoped-request-2203"), "auto-preview loads the scoped representative, not a global sample");
+  assert.equal(await page.locator("#detailModal").isVisible(), false, "representative preview does not nest the existing detail modal");
+  await page.locator('[data-key-route-body="request"]').click();
+  await body.filter({ hasText: "REQUEST_BODY_END" }).waitFor({ state: "visible" });
+  await page.locator('[data-key-route-body="response"]').click();
+  await body.filter({ hasText: "QUOTA_EXCEEDED" }).waitFor({ state: "visible" });
+  await page.locator('[data-key-route-body="response"]').press("End");
+  await body.filter({ hasText: "content-type" }).waitFor({ state: "visible" });
+  await page.locator('[data-key-route-body="requestHeaders"]').press("ArrowLeft");
+  await body.filter({ hasText: "retry-after" }).waitFor({ state: "visible" });
+  await page.locator('[data-key-route-body="responseHeaders"]').press("Home");
+  await body.filter({ hasText: "QUOTA_EXCEEDED" }).waitFor({ state: "visible" });
+  const firstSampleRequests = sampleRequests().length;
+  await choices(0).nth(1).click();
+  await body.filter({ hasText: "UPSTREAM_TIMEOUT" }).waitFor({ state: "visible" });
+  assert.ok((await dialog.textContent()).includes("scoped-request-2202"));
+  await choices(0).first().click();
+  await body.filter({ hasText: "QUOTA_EXCEEDED" }).waitFor({ state: "visible" });
+  assert.equal(sampleRequests().length, firstSampleRequests + 1, "switching back to a loaded representative reuses its body");
+  const failedSample = gateResponse("/api/records/2201");
+  await choices(0).nth(2).click();
+  await failedSample.received;
+  failedSample.release({ status: 503, body: { error: "Fixture sample unavailable" } });
+  await dialog.locator("[data-key-route-sample-retry]").waitFor({ state: "visible" });
+  assert.equal(await page.locator("#pageAlert").isVisible(), false, "sample errors remain local");
+  assert.equal(await choices(0).count(), 3, "body failure keeps the complete error ranking available");
+  await dialog.locator("[data-key-route-sample-retry]").click();
+  await body.filter({ hasText: "INVALID_PARAMETER" }).waitFor({ state: "visible" });
+  await choices(0).first().click();
+  await body.filter({ hasText: "QUOTA_EXCEEDED" }).waitFor({ state: "visible" });
 
   const completedRequestCount = keyRouteRequests().length;
-  await toggle(0).click();
+  const completedSampleCount = sampleRequests().length;
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
   assert.equal(await toggle(0).getAttribute("aria-expanded"), "false");
+  assert.equal(await toggle(0).evaluate((node) => document.activeElement === node), true, "closing returns keyboard focus to the originating route");
+  assert.ok(Math.abs(await page.evaluate(() => scrollY) - reportScrollBeforeOpen) < 2, "closing preserves the report scroll position");
   await toggle(0).click();
   await complete(0);
-  assert.equal(keyRouteRequests().length, completedRequestCount, "reopening a completed route reuses its current-report cache");
-  await page.selectOption("#localeSelect", "en");
-  assert.equal(await toggle(0).getAttribute("aria-expanded"), "true", "language changes preserve the expanded route");
+  await body.filter({ hasText: "QUOTA_EXCEEDED" }).waitFor({ state: "visible" });
+  assert.equal(keyRouteRequests().length, completedRequestCount, "reopening reuses the current-report route cache");
+  assert.equal(sampleRequests().length, completedSampleCount, "reopening also reuses the representative body");
+  await page.selectOption("[data-key-route-locale]", "en");
   await complete(0);
-  assert.equal(keyRouteRequests().length, completedRequestCount, "language changes must not calculate the same route again");
+  assert.equal(await toggle(0).getAttribute("aria-expanded"), "true", "language changes keep the dialog open");
+  assert.equal(keyRouteRequests().length, completedRequestCount, "language changes do not repeat the route query");
+  assert.equal(sampleRequests().length, completedSampleCount, "language changes do not refetch a representative");
   await keyAnalysisTranslations(page, "en");
-  await noOverflow(page, "desktop route error ranking");
-  await page.locator("#apiKeyRoutes").screenshot({ path: "/tmp/tracenote-route-errors-desktop.png" });
+  const englishDialogText = await dialog.evaluate((node) => {
+    const clone = node.cloneNode(true);
+    clone.querySelectorAll("select").forEach((select) => select.remove());
+    return clone.textContent;
+  });
+  assert.ok(!/[\p{Script=Han}]/u.test(englishDialogText), "the dialog follows the English locale, including its preview controls");
+  await boundedRouteDialog(page, "desktop route error dialog");
+  await page.screenshot({ path: "/tmp/tracenote-route-errors-desktop.png" });
   assert.equal(dashboardRequests().length, reportsBeforeExpansion, "route drilldown does not refresh the report");
+  await page.mouse.click(2, 2);
+  await dialog.waitFor({ state: "hidden" });
 
   await page.locator("#advancedFilters > summary").click();
   await page.fill("#path", "/api/v1");
@@ -315,57 +393,81 @@ async function keyRouteDrilldownChecks() {
   await page.fill("#taskType", "image");
   await page.click("#refreshButton");
   await ready(page);
-  assert.equal(await page.locator('[data-key-route-index][aria-expanded="true"]').count(), 0,
-    "a new completed report closes route detail from the previous report");
-  assert.equal(keyRouteRequests().length, completedRequestCount, "refresh must keep route-detail calculation lazy");
+  assert.equal(await page.locator('[data-key-route-index][aria-expanded="true"]').count(), 0);
+  assert.equal(keyRouteRequests().length, completedRequestCount, "refresh keeps route-detail calculation lazy");
   await page.fill("#path", "/unapplied-route-filter");
   await page.fill("#method", "get");
   await page.fill("#taskType", "video");
   await page.fill("#apiKey", "unapplied-key-filter");
   await toggle(0).click();
   await complete(0);
-  assert.equal(keyRouteRequests().length, completedRequestCount + 1, "new reports invalidate previously completed route results");
+  assert.equal(keyRouteRequests().length, completedRequestCount + 1, "new reports invalidate completed route results");
   assert.deepEqual(Object.fromEntries(keyRouteRequests().at(-1).searchParams), {
     api_key: privateKey, path: apiKeyAnalysis.keys[1].routes[0].path, from_ts: String(start), to_ts: String(end),
     method: "POST", task_type: "image",
-  }, "route detail preserves applied method/task type and replaces broad path/key filters with the selected exact values; drafts are ignored");
+  }, "route detail preserves applied method/task type, replaces broad path/key filters with exact values, and ignores drafts");
 
   const previousMetrics = await page.locator("#metricCards").textContent();
   const reportsBeforeFailure = dashboardRequests().length;
   const failedRoute = gateResponse("/api/key-route-errors", (url) => url.searchParams.get("path") === apiKeyAnalysis.keys[1].routes[1].path);
-  await toggle(1).click();
+  await open(1);
   await failedRoute.received;
   failedRoute.release({ status: 503, body: { error: "Fixture route unavailable" } });
   await panel(1).locator("[data-key-route-retry]").waitFor({ state: "visible" });
-  assert.equal(await page.locator("#pageAlert").isVisible(), false, "route errors must stay local to the expanded route");
-  assert.equal(await page.locator("#metricCards").textContent(), previousMetrics, "a failed route detail must preserve the dashboard");
-  assert.equal(await panel(1).locator(".spinner-border").count(), 0, "failed route queries must stop loading");
+  assert.equal(await page.locator("#pageAlert").isVisible(), false, "route errors stay in the dialog");
+  assert.equal(await page.locator("#metricCards").textContent(), previousMetrics);
+  assert.equal(await panel(1).locator(".spinner-border").count(), 0, "failed route queries stop loading");
   await panel(1).locator("[data-key-route-retry]").click();
   await complete(1);
+  await body.filter({ hasText: "QUOTA_EXCEEDED" }).waitFor({ state: "visible" });
   assert.equal(dashboardRequests().length, reportsBeforeFailure, "retry is limited to route details");
 
-  // Disable transport cancellation here to independently test stale-result guards for route, key and report changes.
+  // Remove cancellation to test identity guards independently of browser AbortController behavior.
   await page.evaluate(() => {
     window.__routeFixtureFetch = window.fetch;
     window.fetch = (url, options) => window.__routeFixtureFetch(url,
-      String(url).startsWith("/api/key-route-errors?") ? { ...options, signal: undefined } : options);
+      /^\/api\/(key-route-errors\?|records\/\d+)/.test(String(url)) ? { ...options, signal: undefined } : options);
   });
+  const activeRouteData = keyRouteErrors(keyRouteRequests().at(-1));
+  const lateSampleId = activeRouteData.patterns[1].representative.id;
+  const lateSample = gateResponse(`/api/records/${lateSampleId}`);
+  await choices(1).nth(1).click();
+  await lateSample.received;
+  await choices(1).nth(2).click();
+  await body.filter({ hasText: "INVALID_PARAMETER" }).waitFor({ state: "visible" });
+  const lateSampleResponse = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/records/${lateSampleId}`);
+  lateSample.release();
+  await (await lateSampleResponse).finished();
+  await finishPaint(page);
+  assert.ok((await body.textContent()).includes("INVALID_PARAMETER"), "a late sample response cannot overwrite the currently selected error");
+
   const lateRoute = gateResponse("/api/key-route-errors", (url) => url.searchParams.get("path") === apiKeyAnalysis.keys[1].routes[2].path);
-  await toggle(2).click();
+  await open(2);
   await lateRoute.received;
-  assert.equal(await toggle(2).getAttribute("aria-expanded"), "true");
-  assert.equal(await samples(2).count(), 0, "a pending route must not display patterns from another route");
-  await page.selectOption("#localeSelect", "zh-CN");
+  assert.equal(await choices(2).count(), 0, "pending routes do not show another route's patterns");
+  await page.selectOption("[data-key-route-locale]", "zh-CN");
   assert.match(await panel(2).textContent(), /加载|读取|查询|统计/);
-  await page.selectOption("#localeSelect", "en");
-  assert.ok(!/[\p{Script=Han}]/u.test(await panel(2).textContent()), "in-flight route loading also follows the chosen language");
+  await page.selectOption("[data-key-route-locale]", "en");
+  assert.ok(!/[\p{Script=Han}]/u.test(await panel(2).textContent()));
   await panel(2).filter({ hasText: "Still calculating" }).waitFor({ timeout: 8000 });
+  assert.ok(await panel(2).locator(".key-loading-card").count() > 0, "pending route queries include the ranking skeleton");
+  assert.ok(Number((await panel(2).locator(".key-loading-elapsed").textContent()).match(/\d+/)?.[0]) >= 4,
+    "the elapsed wait indicator must advance while the query is pending");
+  for (const selector of [".key-loading-spinner", ".key-loading-card > span", ".key-loading-code > span"]) {
+    assert.equal(await panel(2).locator(selector).first().evaluate((node) => getComputedStyle(node).animationName), "none",
+      "reduced motion disables loading animation without removing the loading state");
+  }
+  await boundedRouteDialog(page, "pending route dialog");
+  await page.screenshot({ path: "/tmp/tracenote-route-errors-loading.png" });
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  assert.notEqual(await panel(2).locator(".key-loading-spinner").evaluate((node) => getComputedStyle(node).animationName), "none");
+  await page.emulateMedia({ reducedMotion: "reduce" });
   const requestsDuringLoading = keyRouteRequests().length;
-  await toggle(3).click();
+  await open(3);
   await complete(3);
   assert.equal(await page.locator('[data-key-route-index][aria-expanded="true"]').count(), 1);
   assert.equal(await toggle(2).getAttribute("aria-expanded"), "false");
-  assert.equal(keyRouteRequests().length, requestsDuringLoading + 1, "a locale change must not duplicate the pending route query");
+  assert.equal(keyRouteRequests().length, requestsDuringLoading + 1, "locale changes do not duplicate pending route queries");
   const obsoleteRoute = keyRouteErrors(await lateRoute.received);
   obsoleteRoute.patterns[0].error_code = "OBSOLETE_ROUTE_RESPONSE";
   const lateRouteResponse = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/key-route-errors"
@@ -373,14 +475,15 @@ async function keyRouteDrilldownChecks() {
   lateRoute.release({ status: 200, body: obsoleteRoute });
   await (await lateRouteResponse).finished();
   await finishPaint(page);
-  assert.ok(!(await page.locator("#apiKeyRoutes").textContent()).includes("OBSOLETE_ROUTE_RESPONSE"));
-  assert.equal(await toggle(3).getAttribute("aria-expanded"), "true", "a late route response cannot change the active route");
+  assert.ok(!(await dialog.textContent()).includes("OBSOLETE_ROUTE_RESPONSE"));
+  assert.equal(await toggle(3).getAttribute("aria-expanded"), "true");
 
   const lateKey = gateResponse("/api/key-route-errors", (url) => url.searchParams.get("path") === apiKeyAnalysis.keys[1].routes[4].path);
-  await toggle(4).click();
+  await open(4);
   await lateKey.received;
+  await closeRouteDialog(page);
   await page.locator('#apiKeyRanking [data-key-index="2"]').click();
-  assert.equal(await page.locator('[data-key-route-index][aria-expanded="true"]').count(), 0, "key changes close the previous key's route detail");
+  assert.equal(await page.locator('[data-key-route-index][aria-expanded="true"]').count(), 0);
   await toggle(0).click();
   await complete(0);
   assert.equal(keyRouteRequests().at(-1).searchParams.get("api_key"), secondaryKey);
@@ -391,12 +494,13 @@ async function keyRouteDrilldownChecks() {
   lateKey.release({ status: 200, body: obsoleteKey });
   await (await lateKeyResponse).finished();
   await finishPaint(page);
-  assert.ok(!(await page.locator("#apiKeyRoutes").textContent()).includes("OBSOLETE_KEY_RESPONSE"));
+  assert.ok(!(await dialog.textContent()).includes("OBSOLETE_KEY_RESPONSE"));
   assert.equal(await page.locator("#selectedApiKey").textContent(), secondaryKey);
 
   const lateWindow = gateResponse("/api/key-route-errors", (url) => url.searchParams.get("path") === apiKeyAnalysis.keys[2].routes[1].path);
-  await toggle(1).click();
+  await open(1);
   await lateWindow.received;
+  await closeRouteDialog(page);
   await page.click("#refreshButton");
   await ready(page);
   assert.equal(await page.locator('[data-key-route-index][aria-expanded="true"]').count(), 0);
@@ -407,9 +511,8 @@ async function keyRouteDrilldownChecks() {
   lateWindow.release({ status: 200, body: obsoleteWindow });
   await (await lateWindowResponse).finished();
   await finishPaint(page);
-  assert.ok(!(await page.locator("#apiKeyRoutes").textContent()).includes("OBSOLETE_WINDOW_RESPONSE"));
-  assert.equal(await page.locator('[data-key-route-index][aria-expanded="true"]').count(), 0,
-    "old route responses cannot reopen details after a new report has completed");
+  assert.ok(!(await dialog.textContent()).includes("OBSOLETE_WINDOW_RESPONSE"));
+  assert.equal(await dialog.isVisible(), false, "old route responses cannot reopen the dialog after report refresh");
   const emptyRoute = gateResponse("/api/key-route-errors");
   await toggle(0).click();
   const emptyPayload = keyRouteErrors(await emptyRoute.received);
@@ -418,9 +521,49 @@ async function keyRouteDrilldownChecks() {
     total_error_requests: 0, covered_error_rate: 0, truncated: false });
   emptyRoute.release({ status: 200, body: emptyPayload });
   await panel(0).filter({ hasText: "No non-200 requests" }).waitFor({ state: "visible" });
-  assert.equal(await samples(0).count(), 0, "an empty scoped result has an explicit empty state and no stale sample buttons");
+  assert.equal(await choices(0).count(), 0);
   assert.equal(await panel(0).getAttribute("aria-busy"), "false");
   await context.close();
+}
+
+async function largeRouteDialogChecks() {
+  for (const viewport of [{ width: 1200, height: 800 }, { width: 1200, height: 560 }, { width: 390, height: 720 }]) {
+    const { page, context } = await openPage({ mode: "manyRouteErrors", viewport });
+    await page.locator('#apiKeyRanking [data-key-index="1"]').click();
+    await page.locator('[data-key-route-index="0"]').click();
+    const choices = page.locator("#keyRouteDialog [data-key-route-pattern]");
+    const body = page.locator("#keyRouteSampleBody");
+    await body.filter({ hasText: "RESPONSE_BODY_END" }).waitFor({ state: "visible" });
+    assert.equal(await choices.count(), 12, "all top 12 error groups remain available");
+    await boundedRouteDialog(page, `${viewport.width} × ${viewport.height} large route dialog`);
+    await page.screenshot({ path: `/tmp/tracenote-route-errors-${viewport.width}x${viewport.height}.png` });
+    assert.equal(await body.locator("img").count(), 0, "response body is literal text, including markup");
+    assert.equal(await page.evaluate(() => window.__sampleInjection), undefined);
+    assert.ok((await body.textContent()).includes("parameter_89"), "the complete response is kept, not truncated to fit the panel");
+    const initialBodyText = await body.textContent();
+    const bodyBox = await body.evaluate((node) => ({ width: node.clientWidth, scroll: node.scrollWidth }));
+    assert.ok(bodyBox.scroll <= bodyBox.width + 1, "long JSON lines wrap without horizontal clipping");
+    // Browser actionability will scroll all relevant ancestors; a clipped twelfth item would time out here.
+    await choices.nth(11).click();
+    await body.filter({ hasText: "FAILURE_TYPE_12" }).waitFor({ state: "visible" });
+    assert.notEqual(await body.textContent(), initialBodyText);
+    await body.evaluate((node) => {
+      for (let parent = node; parent && parent !== document.body; parent = parent.parentElement) parent.scrollTop = parent.scrollHeight;
+    });
+    await finishPaint(page);
+    const tail = await body.evaluate((node) => {
+      const text = node.firstChild;
+      const content = text?.textContent || "";
+      const index = content.indexOf("RESPONSE_BODY_END");
+      const range = document.createRange();
+      range.setStart(text, index); range.setEnd(text, index + "RESPONSE_BODY_END".length);
+      const rect = range.getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom, height: innerHeight };
+    });
+    assert.ok(tail.top >= 0 && tail.bottom <= tail.height + 1, `response tail must be reachable by vertical scrolling: ${JSON.stringify(tail)}`);
+    await closeRouteDialog(page);
+    await context.close();
+  }
 }
 
 try {
@@ -688,6 +831,7 @@ try {
   await context.close();
 
   await keyRouteDrilldownChecks();
+  await largeRouteDialogChecks();
 
   const initialReport = gateResponse("/api/dashboard");
   const firstLoad = await openPage({ waitForReport: false });
@@ -760,9 +904,11 @@ try {
   await noOverflow(mobile.page, "mobile API key route analysis");
   await mobile.page.locator("#apiKeyAnalysis").screenshot({ path: "/tmp/logark-api-key-mobile.png" });
   await mobile.page.locator('[data-key-route-index="0"]').click();
-  await mobile.page.locator('#keyRouteErrors-0 [data-key-route-sample]').first().waitFor({ state: "visible" });
+  await mobile.page.locator('#keyRouteErrors-0 [data-key-route-pattern]').first().waitFor({ state: "visible" });
   await noOverflow(mobile.page, "mobile route error detail");
-  await mobile.page.locator("#apiKeyRoutes").screenshot({ path: "/tmp/tracenote-route-errors-mobile.png" });
+  await boundedRouteDialog(mobile.page, "mobile route error dialog");
+  await mobile.page.screenshot({ path: "/tmp/tracenote-route-errors-mobile.png" });
+  await closeRouteDialog(mobile.page);
   await mobile.page.locator("#advancedFilters > summary").click();
   await noOverflow(mobile.page, "mobile advanced filters");
   const filterBox = await mobile.page.locator(".advanced-filter-content").boundingBox();
@@ -788,14 +934,16 @@ try {
   assert.equal(await hostile.page.locator("#apiKeyAnalysis img").count(), 0);
   assert.equal(await hostile.page.evaluate(() => window.__apiKeyInjection), undefined);
   await hostile.page.locator('[data-key-route-index="0"]').click();
-  await hostile.page.locator('#keyRouteErrors-0 [data-key-route-sample]').first().waitFor({ state: "visible" });
+  await hostile.page.locator('#keyRouteErrors-0 [data-key-route-pattern]').first().waitFor({ state: "visible" });
   assert.equal(keyRouteRequests().at(-1).searchParams.get("api_key"), hostileKey, "hostile keys are encoded as one exact URL parameter");
   assert.equal(keyRouteRequests().at(-1).searchParams.get("path"), injection, "hostile paths are encoded as one exact URL parameter");
   assert.ok((await hostile.page.locator("#keyRouteErrors-0").textContent()).includes(injection), "untrusted business error codes remain literal text");
-  assert.equal(await hostile.page.locator("#apiKeyAnalysis img").count(), 0, "route error labels must never become executable markup");
+  assert.equal(await hostile.page.locator("#keyRouteDialog img").count(), 0, "route error labels must never become executable markup");
   assert.equal(await hostile.page.evaluate(() => window.__reportInjection), undefined);
   await noOverflow(hostile.page, "hostile route error code on mobile");
-  await hostile.page.locator("#apiKeyRoutes").screenshot({ path: "/tmp/tracenote-route-errors-hostile-mobile.png" });
+  await boundedRouteDialog(hostile.page, "hostile mobile route error dialog");
+  await hostile.page.screenshot({ path: "/tmp/tracenote-route-errors-hostile-mobile.png" });
+  await closeRouteDialog(hostile.page);
   const hostileExport = await exportedReport(hostile.page);
   assert.ok(!hostileExport.includes("fixture-long-plaintext-key-"), "export masks a long untrusted API key before Markdown escaping");
   await noOverflow(hostile.page, "long hostile path in mobile report");
@@ -869,9 +1017,10 @@ try {
   assert.ok((await stat("/tmp/logark-report-mobile.png")).size > 1000);
   assert.ok((await stat("/tmp/logark-api-key-desktop.png")).size > 1000);
   assert.ok((await stat("/tmp/logark-api-key-mobile.png")).size > 1000);
-  console.log("report browser checks passed (WASM/fallback, ranking, coverage, detail, complete API key zh/en translations and missing-dictionary HTML fallbacks, statistical figures and tables, API key rate ranking/small samples/routes/plaintext page and copy/masked export/selection persistence, lazy exact-scope route error ranking/representative requests/cache/locale/local retry/key-route-report race guards, chart keyboard control, applied filters, lazy records, pagination, Markdown export, slow initial loading/localized status/retry/aria-busy, delayed refresh and preserved scope, request deduplication/cancellation/late-response guard, nonblocking records, desktop/tablet/mobile overflow, hostile paths/keys/error codes, empty/success/error/missing-field states)");
+  console.log("report browser checks passed (WASM/fallback, ranking, coverage, detail, complete API key zh/en translations and missing-dictionary HTML fallbacks, statistical figures and tables, API key rate ranking/small samples/routes/plaintext page and copy/masked export/selection persistence, wide route dialog/12-group and long-JSON reachability/keyboard tabs/focus and scroll restoration/loading elapsed/reduced motion/exact-scope ranking/representative preview/cache/locale/local retry/sample-route-key-report race guards, chart keyboard control, applied filters, lazy records, pagination, Markdown export, slow initial loading/localized status/retry/aria-busy, delayed refresh and preserved scope, request deduplication/cancellation/late-response guard, nonblocking records, desktop/tablet/mobile overflow, hostile paths/keys/error codes, empty/success/error/missing-field states)");
   console.log("Screenshots: /tmp/logark-report-desktop.png and /tmp/logark-report-mobile.png");
   console.log("API key screenshots: /tmp/logark-api-key-desktop.png and /tmp/logark-api-key-mobile.png");
+  console.log("Route dialog screenshots: /tmp/tracenote-route-errors-desktop.png, /tmp/tracenote-route-errors-loading.png, /tmp/tracenote-route-errors-390x720.png");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

@@ -191,7 +191,7 @@
       <div class="section-kicker"><span class="section-number">03</span><span data-i18n="keyAnalysis.eyebrow">按凭证追踪失败</span></div>
       <div class="scientific-section-heading">
         <h2 id="apiKeyAnalysisTitle" data-i18n="keyAnalysis.title">API Key 错误率与路由分布</h2>
-        <p data-i18n="keyAnalysis.help">选择一个 Key 查看失败集中路由，点击路由展开错误类型排行，再查看典型请求。</p>
+        <p data-i18n="keyAnalysis.help">选择一个 Key 查看失败集中路由，点击路由打开错误排行和典型请求。</p>
       </div>
       <dl id="apiKeySummary" class="key-summary" aria-live="polite"></dl>
       <div class="key-analysis-grid">
@@ -401,6 +401,18 @@
     <div class="back-top"><a href="#reportOverview" data-i18n="reference.backTop">返回顶部</a></div>
     <footer class="report-footer"><span class="footer-brand">TraceNote</span><span data-i18n="reportView.footer">统计范围以当前筛选条件为准。</span><code>status_code != 200</code><small class="author-credit" data-i18n="brand.author">allen flux 制作</small></footer>
   </main>
+
+  <dialog id="keyRouteDialog" class="key-route-dialog" aria-labelledby="keyRouteDialogTitle">
+    <header class="key-route-dialog-header">
+      <div><span class="key-dialog-eyebrow" data-i18n="keyAnalysis.inspectorEyebrow">路由错误分析</span><h2 id="keyRouteDialogTitle" data-i18n="keyAnalysis.inspectorTitle">错误排行与典型请求</h2></div>
+      <div class="key-route-dialog-actions">
+        <select class="form-select form-select-sm" data-key-route-locale aria-label="语言 / Language"><option value="zh-CN">中文</option><option value="en">English</option></select>
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-key-route-close data-i18n="common.close">关闭</button>
+      </div>
+    </header>
+    <div id="keyRouteDialogContent" class="key-route-dialog-content"></div>
+    <footer class="key-route-dialog-footer"><span data-i18n="keyAnalysis.inspectorHint">选择左侧错误类型，查看对应请求；长内容可在面板内滚动。</span><button type="button" class="btn btn-sm btn-outline-secondary" data-key-route-close data-i18n="keyAnalysis.backToReport">返回报告</button></footer>
+  </dialog>
 
   <div class="modal fade" id="detailModal" tabindex="-1" aria-labelledby="detailModalTitle" aria-hidden="true" style="display: none;">
     <div class="modal-dialog modal-xl modal-dialog-scrollable">

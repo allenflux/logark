@@ -28,6 +28,10 @@ const state = {
   keyRouteIndex: null,
   keyRouteCache: new Map(),
   keyRouteRequest: null,
+  keyRoutePatternIndex: 0,
+  keyRouteSampleTab: "response",
+  keyRouteSampleCache: new Map(),
+  keyRouteSampleRequest: null,
 };
 
 const el = (id) => document.getElementById(id);
@@ -907,13 +911,12 @@ function renderApiKeyRoutes(key) {
     <p class="key-route-measure">${escapeHtml(t("keyAnalysis.routeMeasure"))}</p>
     <div class="key-route-axis" aria-hidden="true"><span>0%</span><span>50%</span><span>100%</span></div>
     <ol class="key-route-list">${routes.map((route, index) => `<li class="key-route-row${index === 0 ? " is-leading" : ""}${state.keyRouteIndex === index ? " is-expanded" : ""}">
-      <button type="button" class="key-route-toggle" id="keyRouteToggle-${index}" data-key-route-index="${index}" aria-expanded="${state.keyRouteIndex === index}" aria-controls="keyRouteErrors-${index}">
+      <button type="button" class="key-route-toggle" id="keyRouteToggle-${index}" data-key-route-index="${index}" aria-expanded="${state.keyRouteIndex === index}" aria-controls="keyRouteDialog" aria-haspopup="dialog">
         <span class="key-route-heading"><code class="route-path">${escapeHtml(route.path || t("keyAnalysis.emptyPath"))}</code><strong class="route-share">${rateFormat(route.error_share, 1)}</strong></span>
         <span class="key-route-track" aria-hidden="true"><span style="width:${clampRate(route.error_share)}%"></span></span>
         <span class="key-route-evidence"><span>${escapeHtml(t("keyAnalysis.counts", { errors: numberFormat(route.error_requests), total: numberFormat(route.total_requests) }))}</span><span>${escapeHtml(t("keyAnalysis.routeRate", { rate: rateFormat(route.error_rate, 2) }))}</span></span>
-        <span class="key-route-action">${escapeHtml(t(state.keyRouteIndex === index ? "keyAnalysis.collapseErrors" : "keyAnalysis.viewErrors"))} <span aria-hidden="true">${state.keyRouteIndex === index ? "−" : "+"}</span></span>
+        <span class="key-route-action">${escapeHtml(t("keyAnalysis.viewErrors"))} <span aria-hidden="true">↗</span></span>
       </button>
-      <div id="keyRouteErrors-${index}" class="key-route-errors" role="region" aria-labelledby="keyRouteToggle-${index}" ${state.keyRouteIndex === index ? "" : "hidden"}></div>
     </li>`).join("")}</ol>
     <p id="apiKeyRouteCoverage" class="key-route-coverage">${escapeHtml(t("keyAnalysis.coverage", { shown: routes.length, total: numberFormat(key.affected_routes), errors: numberFormat(key.returned_route_errors), all: numberFormat(key.error_requests), share: rateFormat(covered, 1) }))}</p>`;
   renderKeyRouteErrors();
@@ -940,55 +943,204 @@ function cancelKeyRouteRequest() {
   if (state.keyRouteCache.get(request.key)?.status === "loading") state.keyRouteCache.delete(request.key);
 }
 
+function cancelKeyRouteSampleRequest() {
+  const request = state.keyRouteSampleRequest;
+  if (!request) return;
+  state.keyRouteSampleRequest = null;
+  request.controller.abort();
+  if (state.keyRouteSampleCache.get(request.id)?.status === "loading") state.keyRouteSampleCache.delete(request.id);
+}
+
 function resetKeyRouteErrors(clearCache = false) {
   cancelKeyRouteRequest();
+  cancelKeyRouteSampleRequest();
   state.keyRouteIndex = null;
-  if (clearCache) state.keyRouteCache.clear();
+  state.keyRoutePatternIndex = 0;
+  state.keyRouteSampleTab = "response";
+  const dialog = el("keyRouteDialog");
+  if (dialog.open) dialog.close();
+  document.body.classList.remove("key-route-dialog-open");
+  el("keyRouteDialogContent").replaceChildren();
+  document.querySelectorAll("[data-key-route-index]").forEach(button => {
+    button.setAttribute("aria-expanded", "false");
+    button.closest(".key-route-row")?.classList.remove("is-expanded");
+  });
+  if (clearCache) {
+    state.keyRouteCache.clear();
+    state.keyRouteSampleCache.clear();
+  }
+}
+
+function closeKeyRouteDialog() {
+  const index = state.keyRouteIndex;
+  resetKeyRouteErrors();
+  if (index !== null) el(`keyRouteToggle-${index}`)?.focus({ preventScroll: true });
+}
+
+function keyRouteLoadingMarkup(entry, sample = false) {
+  const started = entry?.startedAt || Date.now();
+  const bars = '<span></span><span></span><span></span>';
+  return `<div class="key-loading-stage${sample ? " is-sample" : ""}" role="status"><span class="key-loading-spinner" aria-hidden="true"></span><div><strong>${escapeHtml(t(sample ? "keyAnalysis.sampleLoading" : "keyAnalysis.errorsLoading"))}</strong><p class="key-loading-message">${escapeHtml(t(sample ? "keyAnalysis.sampleLoadingHint" : entry?.slow ? "keyAnalysis.errorsWaiting" : "keyAnalysis.loadingHint"))}</p><span class="key-loading-elapsed" data-loading-start="${started}">${escapeHtml(t("keyAnalysis.waitElapsed", { seconds: Math.floor((Date.now() - started) / 1000) }))}</span></div></div>
+    ${sample ? `<div class="key-loading-code" aria-hidden="true">${bars.repeat(3)}</div>` : `<div class="key-loading-preview" aria-hidden="true"><div class="key-loading-ranks">${Array.from({ length: 4 }, () => `<div class="key-loading-card">${bars}</div>`).join("")}</div><div class="key-loading-code">${bars.repeat(3)}</div></div>`}`;
+}
+
+function updateKeyRouteElapsed() {
+  el("keyRouteDialogContent").querySelectorAll("[data-loading-start]").forEach(node => {
+    node.textContent = t("keyAnalysis.waitElapsed", { seconds: Math.floor((Date.now() - Number(node.dataset.loadingStart)) / 1000) });
+  });
 }
 
 function renderKeyRouteErrors() {
   const context = keyRouteContext();
   if (!context) return;
-  const host = el(`keyRouteErrors-${context.index}`);
-  if (!host) return;
+  const container = el("keyRouteDialogContent");
+  const scroll = container.scrollTop;
+  const listScroll = container.querySelector(".key-error-ranking")?.scrollTop || 0;
   const entry = state.keyRouteCache.get(context.key);
   const loading = !entry || entry.status === "loading";
-  host.setAttribute("aria-busy", String(loading));
+  el("keyRouteDialog").querySelector("[data-key-route-locale]").value = i18n.locale;
+  container.innerHTML = `<section id="keyRouteErrors-${context.index}" class="key-route-errors" aria-busy="${loading}">
+    <div class="key-inspector-scope"><code class="key-inspector-path">${escapeHtml(context.params.path || t("keyAnalysis.emptyPath"))}</code>
+      <dl class="key-inspector-meta"><div><dt>API Key</dt><dd><code>${escapeHtml(context.params.api_key)}</code></dd></div><div><dt>${escapeHtml(t("keyAnalysis.reportWindow"))}</dt><dd>${escapeHtml(timeFormat(context.params.from_ts))} — ${escapeHtml(timeFormat(context.params.to_ts))}</dd></div></dl>
+    </div><div class="key-inspector-result"></div></section>`;
+  const host = container.querySelector(".key-inspector-result");
   if (loading) {
-    host.innerHTML = `<p class="key-error-state" role="status">${escapeHtml(t(entry?.slow ? "keyAnalysis.errorsWaiting" : "keyAnalysis.errorsLoading"))}</p>`;
-    return;
-  }
-  if (entry.status === "error") {
+    host.innerHTML = keyRouteLoadingMarkup(entry);
+  } else if (entry.status === "error") {
     host.innerHTML = `<div class="key-error-state" role="status"><p>${escapeHtml(t("keyAnalysis.errorsFailed"))}</p><button type="button" class="btn btn-sm btn-outline-primary" data-key-route-retry>${escapeHtml(t("keyAnalysis.errorsRetry"))}</button></div>`;
+  } else {
+    const { patterns, coverage } = entry.data;
+    if (!patterns.length) {
+      host.innerHTML = `<p class="key-error-state">${escapeHtml(t("keyAnalysis.errorsEmpty"))}</p>`;
+    } else {
+      if (!patterns[state.keyRoutePatternIndex]) state.keyRoutePatternIndex = 0;
+      const missingCodes = patterns.some(pattern => !pattern.error_code);
+      host.innerHTML = `
+        <div class="key-inspector-summary"><div><span>${escapeHtml(t("keyAnalysis.routeFailures"))}</span><strong>${numberFormat(coverage.total_error_requests)}</strong></div><div><span>${escapeHtml(t("keyAnalysis.errorGroups"))}</span><strong>${numberFormat(coverage.total_patterns)}</strong></div><div><span>${escapeHtml(t("patterns.coverageLabel"))}</span><strong>${rateFormat(coverage.covered_error_rate, 1)}</strong></div></div>
+        <div class="key-route-workbench">
+          <section class="key-error-list-pane" aria-label="${escapeHtml(t("keyAnalysis.errorsTitle"))}">
+            <div class="key-errors-heading"><h3>${escapeHtml(t("keyAnalysis.errorsTitle"))}</h3></div>
+            <p class="key-errors-scope">${escapeHtml(t(coverage.truncated ? "keyAnalysis.groupsLimited" : "keyAnalysis.groupsComplete", { shown: patterns.length, total: numberFormat(coverage.total_patterns) }))}</p>
+            <ol class="key-error-ranking">${patterns.map((pattern, index) => `<li class="key-error-pattern"><button type="button" class="key-error-choice${index === state.keyRoutePatternIndex ? " is-selected" : ""}" data-key-route-pattern="${index}" data-key-route-sample="${index}" aria-pressed="${index === state.keyRoutePatternIndex}" aria-controls="keyRouteSampleContent">
+              <span class="key-error-identity"><span class="key-error-rank" aria-hidden="true">${String(index + 1).padStart(2, "0")}</span><span><span class="key-error-http">${escapeHtml(pattern.method)} · HTTP ${Number(pattern.status_code)}</span><code class="key-error-code">${escapeHtml(pattern.error_code || t("patterns.noCode"))}</code></span><span class="key-error-count"><strong>${numberFormat(pattern.count)}</strong><span>${escapeHtml(t("patterns.occurrences"))}</span></span></span>
+              <span class="key-error-share"><span>${escapeHtml(t("keyAnalysis.routeFailureShare"))}</span><strong>${rateFormat(pattern.error_share, 1)}</strong></span>
+              <span class="key-error-track" aria-hidden="true"><span style="width:${clampRate(pattern.error_share)}%"></span></span>
+              <span class="key-error-open">${escapeHtml(t(index === state.keyRoutePatternIndex ? "keyAnalysis.sampleSelected" : "keyAnalysis.inspectResponse"))} <span aria-hidden="true">→</span></span>
+            </button></li>`).join("")}</ol>
+            ${missingCodes ? `<p class="key-errors-missing-code">${escapeHtml(t("keyAnalysis.missingCodeNote"))}</p>` : ""}
+          </section>
+          <section class="key-route-sample-pane" aria-label="${escapeHtml(t("keyAnalysis.sampleTitle"))}"><div class="key-sample-heading"><h3>${escapeHtml(t("keyAnalysis.sampleTitle"))}</h3><span>${String(state.keyRoutePatternIndex + 1).padStart(2, "0")}</span></div><p class="key-sample-note">${escapeHtml(t("keyAnalysis.sampleNote"))}</p><div id="keyRouteSampleContent" aria-live="polite"></div></section>
+        </div>
+        <details class="key-errors-methodology"><summary>${escapeHtml(t("keyAnalysis.errorsCoverage", { shown: patterns.length, total: numberFormat(coverage.total_patterns), errors: numberFormat(coverage.returned_error_requests), all: numberFormat(coverage.total_error_requests), share: rateFormat(coverage.covered_error_rate, 1) }))}</summary><p>${escapeHtml(t("keyAnalysis.errorsMethodology"))}</p><p>${escapeHtml(t("keyAnalysis.snapshotNote"))}</p></details>`;
+      renderKeyRouteSample();
+      host.querySelector(".key-error-ranking").scrollTop = listScroll;
+    }
+  }
+  container.scrollTop = scroll;
+}
+
+function currentKeyRoutePattern() {
+  const context = keyRouteContext();
+  return context && state.keyRouteCache.get(context.key)?.data?.patterns[state.keyRoutePatternIndex];
+}
+
+function renderKeyRouteSample() {
+  const host = el("keyRouteDialogContent").querySelector("#keyRouteSampleContent");
+  const pattern = currentKeyRoutePattern();
+  if (!host || !pattern) return;
+  const id = String(pattern.representative?.id || "");
+  const entry = state.keyRouteSampleCache.get(id);
+  host.setAttribute("aria-busy", String(!entry || entry.status === "loading"));
+  if (!id || entry?.status === "error") {
+    host.innerHTML = `<div class="key-error-state" role="status"><p>${escapeHtml(t("keyAnalysis.sampleFailed"))}</p>${id ? `<button type="button" class="btn btn-sm btn-outline-primary" data-key-route-sample-retry>${escapeHtml(t("keyAnalysis.sampleRetry"))}</button>` : ""}</div>`;
+    host.setAttribute("aria-busy", "false");
     return;
   }
-  const { patterns, coverage } = entry.data;
-  if (!patterns.length) {
-    host.innerHTML = `<p class="key-error-state">${escapeHtml(t("keyAnalysis.errorsEmpty"))}</p>`;
+  if (!entry || entry.status === "loading") {
+    host.innerHTML = keyRouteLoadingMarkup(entry, true);
     return;
   }
-  host.innerHTML = `
-    <div class="key-errors-heading"><h4>${escapeHtml(t("keyAnalysis.errorsTitle"))}</h4><span>${escapeHtml(t("patterns.groupCount", { shown: patterns.length, total: numberFormat(coverage.total_patterns) }))}</span></div>
-    <p class="key-errors-scope">${escapeHtml(t("keyAnalysis.errorsScope"))}<br>${escapeHtml(timeFormat(entry.data.window.from_ts))} — ${escapeHtml(timeFormat(entry.data.window.to_ts))}</p>
-    <ol class="key-error-ranking">${patterns.map((pattern, index) => `<li class="key-error-pattern">
-      <div class="key-error-identity"><span class="key-error-rank" aria-hidden="true">${String(index + 1).padStart(2, "0")}</span><div><span class="key-error-http">${escapeHtml(pattern.method)} · HTTP ${Number(pattern.status_code)}</span><code class="key-error-code">${escapeHtml(pattern.error_code || t("patterns.noCode"))}</code></div><div class="key-error-count"><strong>${numberFormat(pattern.count)}</strong><span>${escapeHtml(t("patterns.occurrences"))}</span></div></div>
-      <div class="key-error-share"><span>${escapeHtml(t("keyAnalysis.routeFailureShare"))}</span><strong>${rateFormat(pattern.error_share, 1)}</strong></div>
-      <div class="key-error-track" aria-hidden="true"><span style="width:${clampRate(pattern.error_share)}%"></span></div>
-      <p class="key-error-recency">${escapeHtml(t("patterns.lastSeen", { time: compactTimeFormat(pattern.last_seen_ts) }))}</p>
-      <div class="key-error-sample"><code>${escapeHtml(pattern.representative?.request_id || "—")}</code><button type="button" class="btn btn-sm btn-outline-primary" data-key-route-sample="${index}" ${pattern.representative?.id ? "" : "disabled"}>${escapeHtml(t("patterns.inspect"))}</button></div>
-    </li>`).join("")}</ol>
-    <p class="key-errors-footnote">${escapeHtml(t("keyAnalysis.errorsCoverage", { shown: patterns.length, total: numberFormat(coverage.total_patterns), errors: numberFormat(coverage.returned_error_requests), all: numberFormat(coverage.total_error_requests), share: rateFormat(coverage.covered_error_rate, 1) }))}<br>${escapeHtml(t("keyAnalysis.errorsMethodology"))}</p>`;
+  const record = entry.record;
+  const tabs = {
+    response: ["detail.responseBody", record.response_body, record.response_body_truncated],
+    request: ["detail.requestBody", record.request_body, record.request_body_truncated],
+    responseHeaders: ["detail.responseHeaders", record.response_headers_json, false],
+    requestHeaders: ["detail.requestHeaders", record.request_headers_json, false],
+  };
+  const tab = tabs[state.keyRouteSampleTab] || tabs.response;
+  const attributes = [
+    [t("detail.recordId"), record.id], ["API Key", record.api_key], ["Path", record.path],
+    [t("detail.query"), record.query_string], [t("detail.clientIp"), record.client_ip],
+    ["uuid", record.uuid], ["task_id", record.task_id], [t("fields.taskType"), record.task_type],
+    ["bid", record.bid], [t("fields.errorCode"), record.error_code],
+    [t("detail.bodySize"), `${numberFormat(record.request_body_size)} B → ${numberFormat(record.response_body_size)} B`],
+  ];
+  host.innerHTML = `<dl class="key-sample-meta"><div><dt>request_id</dt><dd><code>${escapeHtml(record.request_id)}</code></dd></div><div><dt>${escapeHtml(t("columns.time"))}</dt><dd>${escapeHtml(timeFormat(record.request_ts))}</dd></div><div><dt>${escapeHtml(t("columns.status"))} / ${escapeHtml(t("columns.duration"))}</dt><dd>${escapeHtml(record.method)} · HTTP ${Number(record.status_code)} · ${escapeHtml(durationFormat(record.duration_ms))}</dd></div></dl>
+    <details class="key-sample-attributes"><summary>${escapeHtml(t("keyAnalysis.moreAttributes"))}</summary><dl class="key-sample-meta">${attributes.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value ?? "—")}</dd></div>`).join("")}</dl></details>
+    <div class="key-sample-tabs" role="tablist" aria-label="${escapeHtml(t("keyAnalysis.sampleContent"))}">${Object.entries(tabs).map(([name, [label]]) => `<button type="button" role="tab" id="keyRouteTab-${name}" data-key-route-body="${name}" aria-selected="${name === state.keyRouteSampleTab}" aria-controls="keyRouteSampleBody" tabindex="${name === state.keyRouteSampleTab ? 0 : -1}">${escapeHtml(t(label))}</button>`).join("")}</div>
+    ${tab[2] ? `<p class="key-sample-truncated" role="status">${escapeHtml(t("keyAnalysis.bodyTruncated"))}</p>` : ""}
+    <pre id="keyRouteSampleBody" class="key-sample-body" role="tabpanel" tabindex="0" aria-labelledby="keyRouteTab-${state.keyRouteSampleTab}"></pre>`;
+  host.querySelector("#keyRouteSampleBody").textContent = prettyText(tab[1]);
+}
+
+async function loadKeyRouteSample(retry = false) {
+  const context = keyRouteContext();
+  const pattern = currentKeyRoutePattern();
+  const id = String(pattern?.representative?.id || "");
+  if (!context || !id) return;
+  if (!retry && (state.keyRouteSampleCache.get(id)?.status === "ready" || state.keyRouteSampleRequest?.id === id)) return;
+  cancelKeyRouteSampleRequest();
+  if (state.keyRouteSampleCache.size >= 16) state.keyRouteSampleCache.delete(state.keyRouteSampleCache.keys().next().value);
+  const request = { id, contextKey: context.key, controller: new AbortController() };
+  state.keyRouteSampleRequest = request;
+  state.keyRouteSampleCache.set(id, { status: "loading", startedAt: Date.now() });
+  renderKeyRouteSample();
+  const timer = setTimeout(() => request.controller.abort(), 30000);
+  const elapsedTimer = setInterval(() => { if (state.keyRouteSampleRequest === request) updateKeyRouteElapsed(); }, 1000);
+  try {
+    const record = await fetchJson(`/api/records/${encodeURIComponent(id)}`, request.controller.signal);
+    if (state.keyRouteSampleRequest !== request) return;
+    state.keyRouteSampleCache.set(id, { status: "ready", record });
+  } catch (_) {
+    if (state.keyRouteSampleRequest !== request) return;
+    state.keyRouteSampleCache.set(id, { status: "error" });
+  } finally {
+    clearTimeout(timer);
+    clearInterval(elapsedTimer);
+    if (state.keyRouteSampleRequest === request) {
+      state.keyRouteSampleRequest = null;
+      renderKeyRouteSample();
+    }
+  }
+}
+
+function selectKeyRoutePattern(index) {
+  const context = keyRouteContext();
+  if (!context || !state.keyRouteCache.get(context.key)?.data?.patterns[index]) return;
+  if (state.keyRoutePatternIndex !== index) {
+    cancelKeyRouteSampleRequest();
+    state.keyRoutePatternIndex = index;
+    state.keyRouteSampleTab = "response";
+  }
+  renderKeyRouteErrors();
+  const button = el("keyRouteDialogContent").querySelector(`[data-key-route-pattern="${index}"]`);
+  button?.focus({ preventScroll: true });
+  if (window.matchMedia("(max-width: 760px)").matches) {
+    el("keyRouteDialogContent").querySelector(".key-route-sample-pane")?.scrollIntoView({ block: "start", behavior: "instant" });
+  }
+  loadKeyRouteSample();
 }
 
 async function loadKeyRouteErrors(retry = false) {
   const context = keyRouteContext();
   if (!context) return;
   const cached = state.keyRouteCache.get(context.key);
-  if (!retry && (cached?.status === "ready" || state.keyRouteRequest?.key === context.key)) return;
+  if (!retry && cached?.status === "ready") { loadKeyRouteSample(); return; }
+  if (!retry && state.keyRouteRequest?.key === context.key) return;
   cancelKeyRouteRequest();
   // Bound memory for reports with many keys; never persist credentials in browser storage.
   if (state.keyRouteCache.size >= 32) state.keyRouteCache.delete(state.keyRouteCache.keys().next().value);
-  const entry = { status: "loading", slow: false };
+  const entry = { status: "loading", slow: false, startedAt: Date.now() };
   const request = { key: context.key, controller: new AbortController() };
   state.keyRouteCache.set(context.key, entry);
   state.keyRouteRequest = request;
@@ -999,6 +1151,7 @@ async function loadKeyRouteErrors(retry = false) {
     renderKeyRouteErrors();
   }, 4000);
   const timeoutTimer = setTimeout(() => request.controller.abort(), 45000);
+  const elapsedTimer = setInterval(() => { if (state.keyRouteRequest === request) updateKeyRouteElapsed(); }, 1000);
   try {
     // URLSearchParams retains a legitimately empty path and literal %, + and space characters.
     const data = await fetchJson(`/api/key-route-errors?${new URLSearchParams(context.params)}`, request.controller.signal);
@@ -1011,22 +1164,27 @@ async function loadKeyRouteErrors(retry = false) {
   } finally {
     clearTimeout(slowTimer);
     clearTimeout(timeoutTimer);
+    clearInterval(elapsedTimer);
     if (state.keyRouteRequest === request) {
       state.keyRouteRequest = null;
       renderKeyRouteErrors();
+      if (state.keyRouteCache.get(context.key)?.status === "ready") loadKeyRouteSample();
     }
   }
 }
 
 function toggleKeyRoute(index) {
-  const collapse = state.keyRouteIndex === index;
+  if (state.keyRouteIndex === index) { closeKeyRouteDialog(); return; }
   resetKeyRouteErrors();
-  state.keyRouteIndex = collapse ? null : index;
+  state.keyRouteIndex = index;
   const key = state.dashboardPayload?.api_key_analysis?.keys.find(item => item.api_key === state.selectedApiKey);
-  if (!key) return;
+  if (!key?.routes[index]) { resetKeyRouteErrors(); return; }
   renderApiKeyRoutes(key);
-  el(`keyRouteToggle-${index}`)?.focus({ preventScroll: true });
-  if (!collapse) loadKeyRouteErrors();
+  document.body.classList.add("key-route-dialog-open");
+  el("keyRouteDialog").showModal();
+  el("keyRouteDialogContent").scrollTop = 0;
+  el("keyRouteDialog").querySelector("[data-key-route-close]").focus({ preventScroll: true });
+  loadKeyRouteErrors();
 }
 
 function renderDimensionList(targetId, items) {
@@ -1500,6 +1658,49 @@ el("localeSelect").addEventListener("change", (event) => {
   if (el("recordsDisclosure").open) loadRecords(false).catch(showPageError);
 });
 
+el("keyRouteDialog").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeKeyRouteDialog();
+});
+el("keyRouteDialog").addEventListener("close", () => {
+  if (!el("keyRouteDialog").open && state.keyRouteIndex !== null) closeKeyRouteDialog();
+});
+el("keyRouteDialog").addEventListener("click", (event) => {
+  if (event.target.closest("[data-key-route-close]")) { closeKeyRouteDialog(); return; }
+  if (event.target === el("keyRouteDialog")) {
+    const rect = event.target.getBoundingClientRect();
+    if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) closeKeyRouteDialog();
+    return;
+  }
+  if (event.target.closest("[data-key-route-retry]")) { loadKeyRouteErrors(true); return; }
+  if (event.target.closest("[data-key-route-sample-retry]")) { loadKeyRouteSample(true); return; }
+  const pattern = event.target.closest("[data-key-route-pattern]");
+  if (pattern) { selectKeyRoutePattern(Number(pattern.dataset.keyRoutePattern)); return; }
+  const tab = event.target.closest("[data-key-route-body]");
+  if (tab) {
+    state.keyRouteSampleTab = tab.dataset.keyRouteBody;
+    renderKeyRouteSample();
+    el("keyRouteDialog").querySelector(`[data-key-route-body="${state.keyRouteSampleTab}"]`)?.focus({ preventScroll: true });
+  }
+});
+el("keyRouteDialog").addEventListener("change", (event) => {
+  if (!event.target.matches("[data-key-route-locale]")) return;
+  el("localeSelect").value = event.target.value;
+  el("localeSelect").dispatchEvent(new Event("change"));
+});
+el("keyRouteDialog").addEventListener("keydown", (event) => {
+  if (!event.target.matches("[data-key-route-body]")) return;
+  const tabs = [...el("keyRouteDialog").querySelectorAll("[data-key-route-body]")];
+  let index = tabs.indexOf(event.target);
+  if (event.key === "ArrowRight") index = (index + 1) % tabs.length;
+  else if (event.key === "ArrowLeft") index = (index - 1 + tabs.length) % tabs.length;
+  else if (event.key === "Home") index = 0;
+  else if (event.key === "End") index = tabs.length - 1;
+  else return;
+  event.preventDefault();
+  tabs[index].click();
+});
+
 el("patternSort").addEventListener("change", () => {
   if (state.dashboardPayload) renderFailurePatterns(state.dashboardPayload);
 });
@@ -1519,15 +1720,6 @@ el("apiKeyRanking").addEventListener("click", (event) => {
 el("apiKeyRoutes").addEventListener("click", async (event) => {
   const routeButton = event.target.closest("[data-key-route-index]");
   if (routeButton) { toggleKeyRoute(Number(routeButton.dataset.keyRouteIndex)); return; }
-  if (event.target.closest("[data-key-route-retry]")) { loadKeyRouteErrors(true); return; }
-  const sampleButton = event.target.closest("[data-key-route-sample]");
-  if (sampleButton) {
-    const context = keyRouteContext();
-    const entry = context && state.keyRouteCache.get(context.key);
-    const pattern = entry?.data?.patterns[Number(sampleButton.dataset.keyRouteSample)];
-    if (pattern) loadDetailById(pattern.representative?.id, pattern, "keyRoute");
-    return;
-  }
   const button = event.target.closest("[data-copy-api-key]");
   if (!button || !state.selectedApiKey) return;
   if (await window.LogArkClipboard.copy(state.selectedApiKey, { t })) {
