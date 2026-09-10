@@ -1,8 +1,9 @@
 use axum::{routing::get, Router};
-use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use logark::{
+    assets,
     config::Config,
     db,
     handler::{self, AppState},
@@ -29,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app = Router::new()
-        .route("/", get(handler::index))
+        .merge(assets::routes())
         .route("/health", get(handler::health))
         .route("/api/dashboard", get(handler::dashboard))
         .route("/api/records", get(handler::list_records))
@@ -39,7 +40,6 @@ async fn main() -> anyhow::Result<()> {
             get(handler::get_record_by_request_id),
         )
         .route("/api/records/uuid/:uuid", get(handler::get_record_by_uuid))
-        .nest_service("/assets", ServeDir::new("static"))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);

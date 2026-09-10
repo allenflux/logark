@@ -10,6 +10,5 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/logark-server /usr/local/bin/logark-server
 COPY --from=builder /app/target/release/logark-tg-bot /usr/local/bin/logark-tg-bot
-COPY --from=builder /app/static /app/static
 EXPOSE 7700
 CMD ["logark-server"]

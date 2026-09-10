@@ -81,7 +81,8 @@ pub struct HealthResponse {
     pub status: String,
     pub name: String,
     pub cache_entries: usize,
-    pub total_records: i64,
+    /// Legacy health fields are retained as null; readiness does not aggregate audit data.
+    pub total_records: Option<i64>,
     pub latest_request_ts: Option<i64>,
 }
 

@@ -85,6 +85,12 @@ impl AuditAnalyticsService {
         let concurrent_reports = (config.db_max_connections / 9).clamp(1, 2) as usize;
         let query_timeout = Duration::from_secs(config.analytics_query_timeout_secs);
         let redis_cache = RedisReportCache::from_config(&config);
+        tracing::info!(
+            redis_enabled = redis_cache.is_some(),
+            memory_cache_ttl_secs = config.analytics_cache_ttl_secs,
+            redis_cache_ttl_secs = config.redis_cache_ttl_secs,
+            "report cache configured"
+        );
         Self {
             pool,
             config,
@@ -348,21 +354,16 @@ impl AuditAnalyticsService {
         self.dashboard_cache.len().await
     }
 
-    pub async fn health_snapshot(&self) -> anyhow::Result<(i64, Option<i64>)> {
-        let row = sqlx::query(
-            r#"
-            SELECT
-                CAST(COUNT(*) AS SIGNED) AS total_records,
-                CAST(MAX(request_ts) AS SIGNED) AS latest_request_ts
-            FROM api_audit_log
-            "#,
+    pub async fn check_database_ready(&self) -> anyhow::Result<()> {
+        // Include waiting for a pooled connection in the deadline. Readiness
+        // must not scan audit data or compete with report aggregation.
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            sqlx::query("SELECT 1").execute(&self.pool),
         )
-        .fetch_one(&self.pool)
-        .await?;
-
-        let total_records = row.try_get::<i64, _>("total_records")?;
-        let latest_request_ts = row.try_get::<Option<i64>, _>("latest_request_ts")?;
-        Ok((total_records, latest_request_ts))
+        .await
+        .map_err(|_| anyhow::anyhow!("database readiness check timed out"))??;
+        Ok(())
     }
 
     pub async fn report_status_400_bids(

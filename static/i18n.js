@@ -643,6 +643,9 @@
     document.documentElement.lang = locale;
     document.title = translate("meta.title");
     root.querySelectorAll("[data-i18n]").forEach((node) => {
+      // Keep the authored fallback when a dictionary entry is unavailable.
+      // A partially cached release must never turn readable text into a key.
+      if (!has(node.dataset.i18n) && !has(node.dataset.i18n, "zh-CN")) return;
       const variables = node.dataset.i18nCount === undefined
         ? {}
         : { count: Number(node.dataset.i18nCount) };
@@ -652,7 +655,8 @@
     attributes.forEach((attribute) => {
       const dataAttribute = `data-i18n-${attribute}`;
       root.querySelectorAll(`[${dataAttribute}]`).forEach((node) => {
-        node.setAttribute(attribute, translate(node.getAttribute(dataAttribute)));
+        const key = node.getAttribute(dataAttribute);
+        if (has(key) || has(key, "zh-CN")) node.setAttribute(attribute, translate(key));
       });
     });
     const selector = document.getElementById("localeSelect");

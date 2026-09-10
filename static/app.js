@@ -1106,6 +1106,8 @@ function displayedScope() {
 
 function renderRefreshStatus() {
   setRefreshLoading(state.dashboardLoading);
+  el("apiKeyAnalysis").setAttribute("aria-busy", String(state.dashboardLoading));
+  if (!state.dashboardPayload) renderInitialReportState(state.dashboardLoading);
   const hasReport = Boolean(state.dashboardPayload);
   let message = "";
   if (state.dashboardLoading) {
@@ -1132,7 +1134,9 @@ function renderRefreshStatus() {
 
 function renderInitialReportState(loading) {
   if (state.dashboardPayload) return;
-  const message = escapeHtml(loading ? t("refresh.reading") : t("refresh.failedInitial"));
+  let status = loading ? t("refresh.reading") : t("refresh.failedInitial");
+  if (loading && state.dashboardSlow) status += ` ${t("refresh.waiting")}`;
+  const message = escapeHtml(status);
   const spinner = loading ? '<span class="spinner-border spinner-border-sm" aria-hidden="true"></span>' : "";
   el("metricCards").innerHTML = `<div class="metrics-loading text-body-secondary">${spinner}<span>${message}</span></div>`;
   el("failurePatterns").innerHTML = `<div class="empty-state">${message}</div>`;

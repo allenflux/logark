@@ -189,13 +189,19 @@ async function ready(page) {
   }
   await page.evaluate(() => window.LogArkAnalytics.ready);
 }
-async function openPage({ mode = "report", mobile = false, blockWasm = false, waitForReport = true } = {}) {
+async function openPage({ mode = "report", mobile = false, blockWasm = false, waitForReport = true, missingKeyTranslations = false } = {}) {
   scenario = mode;
   const context = await browser.newContext({ viewport: mobile ? { width: 390, height: 844 } : { width: 1440, height: 1100 },
     locale: "zh-CN", reducedMotion: "reduce", acceptDownloads: true });
   const page = await context.newPage();
   page.on("pageerror", (error) => browserErrors.push(error.message));
   if (blockWasm) await page.route("**/assets/analytics.wasm", (route) => route.abort());
+  if (missingKeyTranslations) {
+    const source = await readFile(new URL("static/i18n.js", root), "utf8");
+    const olderDictionary = source.replace(/^\s*"keyAnalysis\.[^"]+":.*\n/gm, "");
+    assert.ok(!olderDictionary.includes('"keyAnalysis.title":'), "the fixture must actually remove the new translation entries");
+    await page.route("**/assets/i18n.js", (route) => route.fulfill({ contentType: "text/javascript", body: olderDictionary }));
+  }
   await page.goto(origin, { waitUntil: waitForReport ? "networkidle" : "domcontentloaded" });
   if (waitForReport) await ready(page);
   return { page, context };
@@ -214,11 +220,25 @@ async function exportedReport(page) {
 async function finishPaint(page) {
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
+async function keyAnalysisTranslations(page, locale) {
+  const actual = await page.evaluate(() => [...document.querySelectorAll('[data-i18n^="keyAnalysis."]')]
+    .map((node) => ({ key: node.dataset.i18n, actual: node.textContent, expected: window.LogArkI18n.t(node.dataset.i18n) })));
+  assert.ok(actual.length >= 8, "the key-analysis navigation, headings and methodology must all be checked");
+  for (const { key, actual: text, expected } of actual) {
+    assert.notEqual(expected, key, `${locale}: ${key} is missing its translation`);
+    assert.equal(text, expected, `${locale}: ${key} must be rendered in the selected language`);
+  }
+  const section = await page.locator("#apiKeyAnalysis").textContent();
+  assert.ok(!/\bkeyAnalysis\.[a-zA-Z]+/.test(section), `${locale}: no internal translation keys may appear in the API key section`);
+  if (locale === "en") assert.ok(!/[\p{Script=Han}]/u.test(section), "English key analysis must include translated dynamic labels and route coverage");
+}
 
 try {
   browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_EXECUTABLE
     || (process.platform === "darwin" ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" : undefined) });
   const { page, context } = await openPage();
+  await keyAnalysisTranslations(page, "zh-CN");
+  assert.equal(await page.locator("#apiKeyAnalysis").getAttribute("aria-busy"), "false");
   assert.equal(await page.evaluate(() => window.LogArkAnalytics.engine), "wasm", "real WebAssembly should load in the browser");
   assert.equal(recordsRequests().length, 0, "initial report must not fetch the records list");
   assert.equal(await page.locator("#failurePatterns .failure-card").count(), 3);
@@ -285,7 +305,7 @@ try {
   assert.equal(await page.locator("#typicalFailuresTitle").textContent(), "Representative failures");
   assert.match(await page.locator("#patternCount").textContent(), /3 \/ 18 patterns/);
   assert.equal(await page.locator("#selectedApiKey").textContent(), privateKey, "locale changes preserve the selected key");
-  assert.ok(!(await page.locator("#apiKeyAnalysis").textContent()).includes("apiKeys."), "API key translations should resolve after locale changes");
+  await keyAnalysisTranslations(page, "en");
   assert.equal(dashboardRequests().length, requestsBeforeKeySelection, "locale changes must not request another report");
   assert.ok(!(await page.locator("#statisticalViews").textContent()).includes("figures."), "figure translations should resolve after locale changes");
   for (const width of [768, 1024]) {
@@ -347,6 +367,8 @@ try {
   assert.ok(!exported.includes("unapplied-draft"), "export uses the applied report scope");
 
   const previousMetrics = await page.locator("#metricCards").textContent();
+  const previousKeyRanking = await page.locator("#apiKeyRanking").textContent();
+  const previousKeyRoutes = await page.locator("#apiKeyRoutes").textContent();
   const delayed = gateResponse("/api/dashboard", (url) => url.searchParams.get("path") === "/api/v1/new-scope");
   await page.fill("#path", "/api/v1/new-scope");
   await page.click("#refreshButton");
@@ -354,6 +376,9 @@ try {
   const pendingRequestCount = dashboardRequests().length;
   assert.equal(await page.locator("#reportExportButton").isDisabled(), false, "the last complete report stays exportable while updating");
   assert.equal(await page.locator("#metricCards").textContent(), previousMetrics, "refreshing must retain readable report metrics");
+  assert.equal(await page.locator("#apiKeyAnalysis").getAttribute("aria-busy"), "true", "key analysis signals that a refresh is pending");
+  assert.equal(await page.locator("#apiKeyRanking").textContent(), previousKeyRanking, "pending refresh keeps the previous key ranking readable");
+  assert.equal(await page.locator("#apiKeyRoutes").textContent(), previousKeyRoutes, "pending refresh keeps the selected key's route evidence readable");
   assert.match(await page.locator("#reportFreshness").textContent(), /\/api\/v1\/scoped/);
   assert.ok((await page.locator("#reportFreshness").textContent()).includes("report-filter-secret-12345"), "displayed scope includes the complete API key");
   await page.fill("#path", "/draft-during-request");
@@ -365,6 +390,8 @@ try {
     document.getElementById("dashboardFilter").requestSubmit();
   });
   await page.locator(".report-refresh-status").filter({ hasText: "server has not returned" }).waitFor({ timeout: 8000 });
+  assert.equal(await page.locator("#apiKeyRanking").textContent(), previousKeyRanking, "the slow-request notice must not clear existing keys");
+  assert.equal(await page.locator("#apiKeyRoutes").textContent(), previousKeyRoutes, "the slow-request notice must not clear existing route evidence");
   assert.equal(dashboardRequests().length, pendingRequestCount, "duplicate form submissions share one in-flight dashboard request");
   await page.click("#searchButton");
   await page.waitForFunction(() => document.getElementById("searchButton").getAttribute("aria-busy") === "false");
@@ -383,6 +410,9 @@ try {
   assert.equal(await page.locator("#refreshSpinner").isVisible(), false, "failed refresh stops its spinner");
   assert.equal(await page.locator("#reportExportButton").isDisabled(), false, "failure keeps the previous report export enabled");
   assert.equal(await page.locator("#metricCards").textContent(), previousMetrics);
+  assert.equal(await page.locator("#apiKeyAnalysis").getAttribute("aria-busy"), "false", "a failed refresh ends the key-analysis loading state");
+  assert.equal(await page.locator("#apiKeyRanking").textContent(), previousKeyRanking);
+  assert.equal(await page.locator("#apiKeyRoutes").textContent(), previousKeyRoutes);
   assert.match(await page.locator("#reportFreshness").textContent(), /\/api\/v1\/scoped/);
   assert.match(await exportedReport(page), /\/api\/v1\/scoped/);
 
@@ -446,9 +476,50 @@ try {
   assert.match(await firstLoad.page.locator("#metricCards").textContent(), /正在读取汇总统计/);
   assert.ok(!(await firstLoad.page.locator("#metricCards").textContent()).includes("计算错误率"));
   assert.equal(await firstLoad.page.locator("#reportExportButton").isDisabled(), true);
-  initialReport.release();
+  assert.equal(await firstLoad.page.locator("#apiKeyAnalysis").getAttribute("aria-busy"), "true");
+  for (const id of ["apiKeyRanking", "apiKeyRoutes"]) {
+    assert.match(await firstLoad.page.locator(`#${id}`).textContent(), /正在读取汇总统计/);
+  }
+  await firstLoad.page.locator("#apiKeyRanking").filter({ hasText: "服务端尚未返回" }).waitFor({ timeout: 8000 });
+  for (const id of ["apiKeyRanking", "apiKeyRoutes"]) {
+    assert.match(await firstLoad.page.locator(`#${id}`).textContent(), /服务端尚未返回/,
+      "each empty key-analysis panel must explain the server delay after four seconds");
+  }
+  await firstLoad.page.selectOption("#localeSelect", "en");
+  await keyAnalysisTranslations(firstLoad.page, "en");
+  for (const id of ["apiKeyRanking", "apiKeyRoutes"]) {
+    assert.match(await firstLoad.page.locator(`#${id}`).textContent(), /server has not returned/,
+      "switching language during a slow first load updates each panel");
+  }
+  await firstLoad.page.locator("#apiKeyAnalysis").screenshot({ path: "/tmp/tracenote-api-key-loading-en.png" });
+  initialReport.release({ status: 503, body: { error: "Fixture initial report unavailable" } });
   await ready(firstLoad.page);
+  assert.equal(await firstLoad.page.locator("#apiKeyAnalysis").getAttribute("aria-busy"), "false");
+  for (const id of ["apiKeyRanking", "apiKeyRoutes"]) {
+    assert.match(await firstLoad.page.locator(`#${id}`).textContent(), /could not be loaded.*Refresh to retry/,
+      "an initial error must replace the waiting message with a retry instruction");
+    assert.equal(await firstLoad.page.locator(`#${id} .spinner-border`).count(), 0);
+  }
+  assert.equal(await firstLoad.page.locator("#refreshButton").isDisabled(), false, "users can retry a failed initial request");
+  await firstLoad.page.click("#refreshButton");
+  await ready(firstLoad.page);
+  assert.equal(await firstLoad.page.locator("#apiKeyRanking button[data-key-index]").count(), 3, "retry recovers the full key analysis");
+  assert.equal(await firstLoad.page.locator("#apiKeyAnalysis").getAttribute("aria-busy"), "false");
   await firstLoad.context.close();
+
+  const missingTranslationRequest = gateResponse("/api/dashboard");
+  const missingTranslations = await openPage({ waitForReport: false, missingKeyTranslations: true });
+  await missingTranslationRequest.received;
+  for (const locale of ["zh-CN", "en"]) {
+    await missingTranslations.page.selectOption("#localeSelect", locale);
+    assert.equal(await missingTranslations.page.locator("#apiKeyAnalysisTitle").textContent(), "API Key 错误率与路由分布",
+      "missing dictionary entries preserve the readable HTML fallback");
+    assert.ok(!/\bkeyAnalysis\.[a-zA-Z]+/.test(await missingTranslations.page.locator("#apiKeyAnalysis").textContent()),
+      "an older dictionary must not reproduce the raw-key headings in the reported screenshot");
+  }
+  await missingTranslations.page.locator("#apiKeyAnalysis").screenshot({ path: "/tmp/tracenote-api-key-missing-translations.png" });
+  await missingTranslations.context.close();
+  missingTranslationRequest.release();
 
   const mobile = await openPage({ mobile: true });
   await noOverflow(mobile.page, "mobile report");
@@ -566,7 +637,7 @@ try {
   assert.ok((await stat("/tmp/logark-report-mobile.png")).size > 1000);
   assert.ok((await stat("/tmp/logark-api-key-desktop.png")).size > 1000);
   assert.ok((await stat("/tmp/logark-api-key-mobile.png")).size > 1000);
-  console.log("report browser checks passed (WASM/fallback, ranking, coverage, detail, locale, statistical figures and tables, API key rate ranking/small samples/routes/plaintext page and copy/masked export/selection persistence, chart keyboard control, applied filters, lazy records, pagination, Markdown export, delayed refresh and preserved scope, request deduplication/cancellation/late-response guard, nonblocking records, desktop/tablet/mobile overflow, hostile paths and keys, empty/success/error/missing-field states)");
+  console.log("report browser checks passed (WASM/fallback, ranking, coverage, detail, complete API key zh/en translations and missing-dictionary HTML fallbacks, statistical figures and tables, API key rate ranking/small samples/routes/plaintext page and copy/masked export/selection persistence, chart keyboard control, applied filters, lazy records, pagination, Markdown export, slow initial loading/localized status/retry/aria-busy, delayed refresh and preserved scope, request deduplication/cancellation/late-response guard, nonblocking records, desktop/tablet/mobile overflow, hostile paths and keys, empty/success/error/missing-field states)");
   console.log("Screenshots: /tmp/logark-report-desktop.png and /tmp/logark-report-mobile.png");
   console.log("API key screenshots: /tmp/logark-api-key-desktop.png and /tmp/logark-api-key-mobile.png");
 } finally {

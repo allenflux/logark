@@ -1,7 +1,7 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::{Html, IntoResponse},
+    response::IntoResponse,
     Json,
 };
 use serde_json::json;
@@ -16,24 +16,25 @@ pub struct AppState {
     pub audit_service: AuditAnalyticsService,
 }
 
-pub async fn index() -> Html<&'static str> {
-    Html(include_str!("../../static/index.html"))
-}
+pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
+    let (http_status, status) = match state.audit_service.check_database_ready().await {
+        Ok(()) => (StatusCode::OK, "ok"),
+        Err(error) => {
+            tracing::warn!(error = %error, "database readiness check failed");
+            (StatusCode::SERVICE_UNAVAILABLE, "unavailable")
+        }
+    };
 
-pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    let (total_records, latest_request_ts) = state
-        .audit_service
-        .health_snapshot()
-        .await
-        .unwrap_or((0, None));
-
-    Json(HealthResponse {
-        status: "ok".into(),
-        name: "logark".into(),
-        cache_entries: state.audit_service.cache_entry_count().await,
-        total_records,
-        latest_request_ts,
-    })
+    (
+        http_status,
+        Json(HealthResponse {
+            status: status.into(),
+            name: "logark".into(),
+            cache_entries: state.audit_service.cache_entry_count().await,
+            total_records: None,
+            latest_request_ts: None,
+        }),
+    )
 }
 
 pub async fn dashboard(
@@ -115,5 +116,93 @@ impl IntoResponse for AppError {
                 (StatusCode::NOT_FOUND, Json(json!({ "error": message }))).into_response()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+    use crate::config::Config;
+    use sqlx::{mysql::MySqlPoolOptions, MySqlPool};
+    use std::time::Duration;
+
+    fn state(pool: MySqlPool) -> AppState {
+        let config = Config {
+            addr: "127.0.0.1:0".into(),
+            database_url: String::new(),
+            db_max_connections: 1,
+            analytics_cache_ttl_secs: 15,
+            analytics_query_timeout_secs: 300,
+            redis_url: None,
+            redis_cache_ttl_secs: 60,
+            redis_operation_timeout_ms: 200,
+            default_window_hours: 24,
+            max_window_hours: 168,
+            max_list_limit: 100,
+            slow_request_ms: 1000,
+            audit_retention_days: 14,
+            audit_cleanup_interval_secs: 3600,
+            audit_cleanup_batch_size: 1000,
+            tg_bot_token: None,
+            tg_chat_id: None,
+            tg_poll_interval_secs: 10,
+            tg_report_hour: 9,
+            tg_report_minute: 0,
+            tg_timezone_offset_hours: 8,
+            tg_default_report_limit: 20,
+        };
+        AppState {
+            audit_service: AuditAnalyticsService::new(pool, config),
+        }
+    }
+
+    #[tokio::test]
+    async fn health_reports_database_failure_without_fake_record_count() -> anyhow::Result<()> {
+        let pool = MySqlPoolOptions::new().connect_lazy("mysql://localhost/health_test")?;
+        pool.close().await;
+        let response = health(State(state(pool))).await.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let value: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(value["status"], "unavailable");
+        assert_eq!(value["name"], "logark");
+        assert_eq!(value["cache_entries"], 0);
+        assert!(value.get("total_records").unwrap().is_null());
+        assert!(value.get("latest_request_ts").unwrap().is_null());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn health_deadline_includes_waiting_for_a_database_connection() -> anyhow::Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("mysql://health_test@{}/health_test", listener.local_addr()?);
+        // Accept the TCP connection but never complete the database handshake.
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            drop(socket);
+        });
+        let pool = MySqlPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(30))
+            .connect_lazy(&url)?;
+        let response =
+            tokio::time::timeout(Duration::from_secs(4), health(State(state(pool)))).await;
+        server.abort();
+        assert_eq!(response?.0, StatusCode::SERVICE_UNAVAILABLE);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires LOGARK_TEST_DATABASE_URL pointing to a disposable MariaDB instance"]
+    async fn health_ready_does_not_require_audit_data() -> anyhow::Result<()> {
+        let pool = MySqlPoolOptions::new()
+            .connect(&std::env::var("LOGARK_TEST_DATABASE_URL")?)
+            .await?;
+        let (status, Json(body)) = health(State(state(pool))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.status, "ok");
+        assert_eq!(body.total_records, None);
+        assert_eq!(body.latest_request_ts, None);
+        Ok(())
     }
 }

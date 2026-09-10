@@ -59,6 +59,8 @@ P95 使用精确最近秩：先按整数耗时统计频数，再按耗时降序�
 
 设置 `LOGARK_REDIS_URL` 后，成功报告会进入 Redis，共享给后续请求和重新启动的服务实例。`LOGARK_REDIS_CACHE_TTL_SECS` 默认 60 秒，从计算完成起算；读取不续期，本机缓存命中 Redis 后只保留两级缓存剩余有效期的较小值。Redis 查询在数据库并发队列之前执行，缓存命中不会被其他筛选的慢 SQL 阻挡。Redis 操作默认最多等待 200 ms，由 `LOGARK_REDIS_OPERATION_TIMEOUT_MS` 控制；连接失败、超时或坏缓存均自动回退数据库。未配置连接或 Redis TTL 为 0 时保持仅内存缓存。
 
+启动日志 `report cache configured` 会输出 `redis_enabled` 和两级缓存的 TTL，不输出连接地址或密码。`redis_enabled=false` 表示该进程未启用 Redis；后续报告日志 `source="shared_cache"` 才表示实际命中共享缓存。仅默认 Compose 文件不会加载 `.env.redis`，使用下方覆盖文件命令注入该私有配置。
+
 缓存键包含版本、数据库身份与全部规范化筛选的 SHA-256 摘要，不包含明文 API Key。缓存值包含报告及其代表请求摘要，因此应使用私有连接配置；不缓存请求/响应正文。缓存最长可复用默认 60 秒，页面继续显示报告真实时间范围。首次计算、过期或 Redis 不可用时仍需查询数据库。
 
 把连接配置放在本机 `.env.redis`（已从 Git 和 Docker 构建上下文排除），例如 `LOGARK_REDIS_URL=redis://:URL编码后的密码@主机:端口/0`。本机启动先读取 `.env.redis` 再读取 `.env`，显式进程环境优先。Compose 部署时把私有配置单独放到应用服务器的项目目录，使用可选覆盖文件：
@@ -91,7 +93,7 @@ docker compose -f docker-compose.yml -f docker-compose.redis.yml up -d --build l
 
 ## WebAssembly 开发与验证
 
-`static/analytics.wasm` 已随源码提供，现有静态资源部署和 Docker 镜像会直接包含它。修改 Rust 分析算法后重新构建：
+`static/analytics.wasm` 已随源码提供，构建服务时会与 HTML、脚本、样式和图标一起嵌入可执行文件。修改 Rust 分析算法后重新构建：
 
 ```bash
 rustup target add wasm32-unknown-unknown
@@ -111,6 +113,12 @@ API Key 的隔离数据库测试为 `cargo test api_key_analysis_preserves_full_
 算法、回退行为和 ABI 见 [analytics-wasm/README.md](analytics-wasm/README.md)。计算在浏览器本地执行，WASM 与 JavaScript 使用一致的数值规则。
 
 视觉参考、字体替代与图表统计口径见 [docs/visual-design.md](docs/visual-design.md)。新增图表使用已有接口与 Method 聚合，不增加数据库查询；散点图只描述返回的含失败接口，Pareto 图展示前 8 个接口，累计占比仍以完整窗口的失败数为分母。分母缺失或小于已展示计数时，保留计数并明确显示累计占比不可用。
+
+### 前端发布与浏览器缓存
+
+服务从同一可执行文件提供 HTML、语言包、脚本、样式、WASM 和图标，不再从运行目录读取 `static/`。修改前端后需重新构建并重启服务，Docker 部署使用 `docker compose up -d --build`；仅复制新的 `static/` 文件不会更新页面。
+
+构建内的全部前端内容共同生成 SHA-256 版本。HTML 使用 `/assets/<版本>/…` 并返回 `Cache-Control: no-cache`，浏览器加载页面时会重新验证；版本资源可长期缓存，任何前端内容变化都会更换 URL，避免新页面混用旧语言包或旧脚本。WASM 从其脚本所在版本目录加载。旧固定资源 URL 保留兼容并返回 `no-cache`；不存在的资源或不匹配的版本返回 404，不会静默替换成另一版文件。
 
 ## 快速启动
 
@@ -157,7 +165,7 @@ cargo run --bin logark-tg-bot
 
 ## 接口示例
 
-健康检查：
+健康检查只执行 `SELECT 1` 验证数据库连接，连接池等待与查询合计最多 2 秒，避免定时健康检查全表统计与报表争抢资源。就绪返回 HTTP `200` / `status: "ok"`，数据库不可用或超时返回 HTTP `503` / `status: "unavailable"`，Docker 会据此判断健康状态。响应保留 `total_records`、`latest_request_ts` 字段以兼容已有结构，但二者始终为 `null`，不再提供全表统计；报表统计请使用仪表盘接口。
 
 ```bash
 curl http://127.0.0.1:7700/health

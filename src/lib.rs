@@ -1,3 +1,5 @@
+#[path = "../internal/assets/mod.rs"]
+pub mod assets;
 #[path = "../internal/bot/mod.rs"]
 pub mod bot;
 #[path = "../internal/config/mod.rs"]
