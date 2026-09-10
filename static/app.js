@@ -23,7 +23,11 @@ const state = {
   recordsLoading: false,
   chartMode: "volume",
   detailPattern: null,
+  detailScope: null,
   selectedApiKey: null,
+  keyRouteIndex: null,
+  keyRouteCache: new Map(),
+  keyRouteRequest: null,
 };
 
 const el = (id) => document.getElementById(id);
@@ -902,12 +906,127 @@ function renderApiKeyRoutes(key) {
     <dl class="key-selected-stats"><div><dt>${escapeHtml(t("keyAnalysis.keyRate"))}</dt><dd>${rateFormat(key.error_rate, 2)}</dd></div><div><dt>${escapeHtml(t("keyAnalysis.errorShare"))}</dt><dd>${rateFormat(key.error_share, 2)}</dd></div><div><dt>${escapeHtml(t("keyAnalysis.affectedRoutes"))}</dt><dd>${numberFormat(key.affected_routes)}</dd></div></dl>
     <p class="key-route-measure">${escapeHtml(t("keyAnalysis.routeMeasure"))}</p>
     <div class="key-route-axis" aria-hidden="true"><span>0%</span><span>50%</span><span>100%</span></div>
-    <ol class="key-route-list">${routes.map((route, index) => `<li class="key-route-row${index === 0 ? " is-leading" : ""}">
-      <div class="key-route-heading"><code class="route-path">${escapeHtml(route.path || t("keyAnalysis.emptyPath"))}</code><strong class="route-share">${rateFormat(route.error_share, 1)}</strong></div>
-      <div class="key-route-track" aria-hidden="true"><span style="width:${clampRate(route.error_share)}%"></span></div>
-      <div class="key-route-evidence"><span>${escapeHtml(t("keyAnalysis.counts", { errors: numberFormat(route.error_requests), total: numberFormat(route.total_requests) }))}</span><span>${escapeHtml(t("keyAnalysis.routeRate", { rate: rateFormat(route.error_rate, 2) }))}</span></div>
+    <ol class="key-route-list">${routes.map((route, index) => `<li class="key-route-row${index === 0 ? " is-leading" : ""}${state.keyRouteIndex === index ? " is-expanded" : ""}">
+      <button type="button" class="key-route-toggle" id="keyRouteToggle-${index}" data-key-route-index="${index}" aria-expanded="${state.keyRouteIndex === index}" aria-controls="keyRouteErrors-${index}">
+        <span class="key-route-heading"><code class="route-path">${escapeHtml(route.path || t("keyAnalysis.emptyPath"))}</code><strong class="route-share">${rateFormat(route.error_share, 1)}</strong></span>
+        <span class="key-route-track" aria-hidden="true"><span style="width:${clampRate(route.error_share)}%"></span></span>
+        <span class="key-route-evidence"><span>${escapeHtml(t("keyAnalysis.counts", { errors: numberFormat(route.error_requests), total: numberFormat(route.total_requests) }))}</span><span>${escapeHtml(t("keyAnalysis.routeRate", { rate: rateFormat(route.error_rate, 2) }))}</span></span>
+        <span class="key-route-action">${escapeHtml(t(state.keyRouteIndex === index ? "keyAnalysis.collapseErrors" : "keyAnalysis.viewErrors"))} <span aria-hidden="true">${state.keyRouteIndex === index ? "−" : "+"}</span></span>
+      </button>
+      <div id="keyRouteErrors-${index}" class="key-route-errors" role="region" aria-labelledby="keyRouteToggle-${index}" ${state.keyRouteIndex === index ? "" : "hidden"}></div>
     </li>`).join("")}</ol>
     <p id="apiKeyRouteCoverage" class="key-route-coverage">${escapeHtml(t("keyAnalysis.coverage", { shown: routes.length, total: numberFormat(key.affected_routes), errors: numberFormat(key.returned_route_errors), all: numberFormat(key.error_requests), share: rateFormat(covered, 1) }))}</p>`;
+  renderKeyRouteErrors();
+}
+
+function keyRouteContext() {
+  if (state.keyRouteIndex === null || !state.dashboardPayload) return null;
+  const key = state.dashboardPayload.api_key_analysis?.keys.find(item => item.api_key === state.selectedApiKey);
+  const route = key?.routes[state.keyRouteIndex];
+  if (!route) return null;
+  const { from_ts, to_ts } = state.dashboardPayload.window;
+  const params = { api_key: key.api_key, path: route.path, from_ts, to_ts };
+  for (const name of ["method", "task_type"]) {
+    if (state.appliedDashboardParams?.[name]) params[name] = state.appliedDashboardParams[name];
+  }
+  return { key: JSON.stringify(params), params, index: state.keyRouteIndex };
+}
+
+function cancelKeyRouteRequest() {
+  const request = state.keyRouteRequest;
+  if (!request) return;
+  state.keyRouteRequest = null;
+  request.controller.abort();
+  if (state.keyRouteCache.get(request.key)?.status === "loading") state.keyRouteCache.delete(request.key);
+}
+
+function resetKeyRouteErrors(clearCache = false) {
+  cancelKeyRouteRequest();
+  state.keyRouteIndex = null;
+  if (clearCache) state.keyRouteCache.clear();
+}
+
+function renderKeyRouteErrors() {
+  const context = keyRouteContext();
+  if (!context) return;
+  const host = el(`keyRouteErrors-${context.index}`);
+  if (!host) return;
+  const entry = state.keyRouteCache.get(context.key);
+  const loading = !entry || entry.status === "loading";
+  host.setAttribute("aria-busy", String(loading));
+  if (loading) {
+    host.innerHTML = `<p class="key-error-state" role="status">${escapeHtml(t(entry?.slow ? "keyAnalysis.errorsWaiting" : "keyAnalysis.errorsLoading"))}</p>`;
+    return;
+  }
+  if (entry.status === "error") {
+    host.innerHTML = `<div class="key-error-state" role="status"><p>${escapeHtml(t("keyAnalysis.errorsFailed"))}</p><button type="button" class="btn btn-sm btn-outline-primary" data-key-route-retry>${escapeHtml(t("keyAnalysis.errorsRetry"))}</button></div>`;
+    return;
+  }
+  const { patterns, coverage } = entry.data;
+  if (!patterns.length) {
+    host.innerHTML = `<p class="key-error-state">${escapeHtml(t("keyAnalysis.errorsEmpty"))}</p>`;
+    return;
+  }
+  host.innerHTML = `
+    <div class="key-errors-heading"><h4>${escapeHtml(t("keyAnalysis.errorsTitle"))}</h4><span>${escapeHtml(t("patterns.groupCount", { shown: patterns.length, total: numberFormat(coverage.total_patterns) }))}</span></div>
+    <p class="key-errors-scope">${escapeHtml(t("keyAnalysis.errorsScope"))}<br>${escapeHtml(timeFormat(entry.data.window.from_ts))} — ${escapeHtml(timeFormat(entry.data.window.to_ts))}</p>
+    <ol class="key-error-ranking">${patterns.map((pattern, index) => `<li class="key-error-pattern">
+      <div class="key-error-identity"><span class="key-error-rank" aria-hidden="true">${String(index + 1).padStart(2, "0")}</span><div><span class="key-error-http">${escapeHtml(pattern.method)} · HTTP ${Number(pattern.status_code)}</span><code class="key-error-code">${escapeHtml(pattern.error_code || t("patterns.noCode"))}</code></div><div class="key-error-count"><strong>${numberFormat(pattern.count)}</strong><span>${escapeHtml(t("patterns.occurrences"))}</span></div></div>
+      <div class="key-error-share"><span>${escapeHtml(t("keyAnalysis.routeFailureShare"))}</span><strong>${rateFormat(pattern.error_share, 1)}</strong></div>
+      <div class="key-error-track" aria-hidden="true"><span style="width:${clampRate(pattern.error_share)}%"></span></div>
+      <p class="key-error-recency">${escapeHtml(t("patterns.lastSeen", { time: compactTimeFormat(pattern.last_seen_ts) }))}</p>
+      <div class="key-error-sample"><code>${escapeHtml(pattern.representative?.request_id || "—")}</code><button type="button" class="btn btn-sm btn-outline-primary" data-key-route-sample="${index}" ${pattern.representative?.id ? "" : "disabled"}>${escapeHtml(t("patterns.inspect"))}</button></div>
+    </li>`).join("")}</ol>
+    <p class="key-errors-footnote">${escapeHtml(t("keyAnalysis.errorsCoverage", { shown: patterns.length, total: numberFormat(coverage.total_patterns), errors: numberFormat(coverage.returned_error_requests), all: numberFormat(coverage.total_error_requests), share: rateFormat(coverage.covered_error_rate, 1) }))}<br>${escapeHtml(t("keyAnalysis.errorsMethodology"))}</p>`;
+}
+
+async function loadKeyRouteErrors(retry = false) {
+  const context = keyRouteContext();
+  if (!context) return;
+  const cached = state.keyRouteCache.get(context.key);
+  if (!retry && (cached?.status === "ready" || state.keyRouteRequest?.key === context.key)) return;
+  cancelKeyRouteRequest();
+  // Bound memory for reports with many keys; never persist credentials in browser storage.
+  if (state.keyRouteCache.size >= 32) state.keyRouteCache.delete(state.keyRouteCache.keys().next().value);
+  const entry = { status: "loading", slow: false };
+  const request = { key: context.key, controller: new AbortController() };
+  state.keyRouteCache.set(context.key, entry);
+  state.keyRouteRequest = request;
+  renderKeyRouteErrors();
+  const slowTimer = setTimeout(() => {
+    if (state.keyRouteRequest !== request) return;
+    entry.slow = true;
+    renderKeyRouteErrors();
+  }, 4000);
+  const timeoutTimer = setTimeout(() => request.controller.abort(), 45000);
+  try {
+    // URLSearchParams retains a legitimately empty path and literal %, + and space characters.
+    const data = await fetchJson(`/api/key-route-errors?${new URLSearchParams(context.params)}`, request.controller.signal);
+    if (state.keyRouteRequest !== request) return;
+    if (!Array.isArray(data.patterns) || !data.coverage || !data.window) throw new Error("Invalid route error response");
+    state.keyRouteCache.set(context.key, { status: "ready", data });
+  } catch (_) {
+    if (state.keyRouteRequest !== request) return;
+    state.keyRouteCache.set(context.key, { status: "error" });
+  } finally {
+    clearTimeout(slowTimer);
+    clearTimeout(timeoutTimer);
+    if (state.keyRouteRequest === request) {
+      state.keyRouteRequest = null;
+      renderKeyRouteErrors();
+    }
+  }
+}
+
+function toggleKeyRoute(index) {
+  const collapse = state.keyRouteIndex === index;
+  resetKeyRouteErrors();
+  state.keyRouteIndex = collapse ? null : index;
+  const key = state.dashboardPayload?.api_key_analysis?.keys.find(item => item.api_key === state.selectedApiKey);
+  if (!key) return;
+  renderApiKeyRoutes(key);
+  el(`keyRouteToggle-${index}`)?.focus({ preventScroll: true });
+  if (!collapse) loadKeyRouteErrors();
 }
 
 function renderDimensionList(targetId, items) {
@@ -1034,7 +1153,7 @@ function renderDetail(record) {
   el("detailSubtitle").textContent = `${record.method} ${record.path} · ${timeFormat(record.request_ts)}`;
   const context = el("detailPatternContext");
   context.classList.toggle("d-none", !state.detailPattern);
-  context.textContent = state.detailPattern ? t("patterns.detailContext", {count: numberFormat(state.detailPattern.count), share: rateFormat(state.detailPattern.impact_share_pct ?? state.detailPattern.error_share), signature: failureSignature(state.detailPattern)}) : "";
+  context.textContent = state.detailPattern ? t(state.detailScope === "keyRoute" ? "keyAnalysis.detailContext" : "patterns.detailContext", {count: numberFormat(state.detailPattern.count), share: rateFormat(state.detailPattern.impact_share_pct ?? state.detailPattern.error_share), signature: failureSignature(state.detailPattern)}) : "";
 
   const meta = [
     [t("detail.recordId"), `#${record.id}`],
@@ -1154,6 +1273,7 @@ async function loadDashboard(params, signal) {
     throw error;
   }
   if (token !== state.dashboardRequestToken) return false;
+  resetKeyRouteErrors(true);
   state.dashboardPayload = payload;
   state.appliedDashboardParams = params;
   renderDashboardPayload(payload);
@@ -1297,10 +1417,11 @@ function refreshAll() {
   return request.promise;
 }
 
-async function loadDetailById(id, pattern = null) {
+async function loadDetailById(id, pattern = null, scope = null) {
   if (!id) return;
   const token = ++state.detailRequestToken;
   state.detailPattern = pattern;
+  state.detailScope = scope;
   state.detailModal.show();
   el("detailLoading").classList.remove("d-none");
   el("detailError").classList.add("d-none");
@@ -1386,6 +1507,7 @@ el("apiKeyRanking").addEventListener("click", (event) => {
   const button = event.target.closest("[data-key-index]");
   const key = state.dashboardPayload?.api_key_analysis?.keys[Number(button?.dataset.keyIndex)];
   if (!button || !key) return;
+  if (state.selectedApiKey !== key.api_key) resetKeyRouteErrors();
   state.selectedApiKey = key.api_key;
   el("apiKeyRanking").querySelectorAll("[data-key-index]").forEach(item => {
     const selected = item === button;
@@ -1395,14 +1517,22 @@ el("apiKeyRanking").addEventListener("click", (event) => {
   renderApiKeyRoutes(key);
 });
 el("apiKeyRoutes").addEventListener("click", async (event) => {
+  const routeButton = event.target.closest("[data-key-route-index]");
+  if (routeButton) { toggleKeyRoute(Number(routeButton.dataset.keyRouteIndex)); return; }
+  if (event.target.closest("[data-key-route-retry]")) { loadKeyRouteErrors(true); return; }
+  const sampleButton = event.target.closest("[data-key-route-sample]");
+  if (sampleButton) {
+    const context = keyRouteContext();
+    const entry = context && state.keyRouteCache.get(context.key);
+    const pattern = entry?.data?.patterns[Number(sampleButton.dataset.keyRouteSample)];
+    if (pattern) loadDetailById(pattern.representative?.id, pattern, "keyRoute");
+    return;
+  }
   const button = event.target.closest("[data-copy-api-key]");
   if (!button || !state.selectedApiKey) return;
-  try {
-    await navigator.clipboard.writeText(state.selectedApiKey);
+  if (await window.LogArkClipboard.copy(state.selectedApiKey, { t })) {
     button.textContent = t("patterns.copied");
     setTimeout(() => { if (button.isConnected) button.textContent = t("keyAnalysis.copy"); }, 1800);
-  } catch (_) {
-    showPageError(new Error(t("patterns.copyFailed")));
   }
 });
 el("hours").addEventListener("change", refreshAll);
@@ -1425,12 +1555,9 @@ el("failurePatterns").addEventListener("click", async (event) => {
   const pattern = state.dashboardPayload.failure_patterns[Number(detailButton ? button.dataset.patternDetail : button.dataset.patternCopy)];
   if (!pattern) return;
   if (detailButton) { loadDetailById(pattern.representative?.id, pattern); return; }
-  try {
-    await navigator.clipboard.writeText(`${failureSignature(pattern)}\nrequest_id: ${pattern.representative?.request_id || ""}`);
+  if (await window.LogArkClipboard.copy(`${failureSignature(pattern)}\nrequest_id: ${pattern.representative?.request_id || ""}`, { t })) {
     button.textContent = t("patterns.copied");
     setTimeout(()=>{if(button.isConnected)button.textContent=t("patterns.copy");},1800);
-  } catch (_) {
-    showPageError(new Error(t("patterns.copyFailed")));
   }
 });
 document.querySelectorAll('a[href="#recordsDisclosure"], a[href="#requestDetails"]').forEach(link=>link.addEventListener("click",()=>{el("recordsDisclosure").open=true;}));

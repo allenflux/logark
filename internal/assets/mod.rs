@@ -36,6 +36,7 @@ const ASSETS: &[Asset] = &[
     asset!("i18n.js", "text/javascript; charset=utf-8"),
     asset!("analytics.js", "text/javascript; charset=utf-8"),
     asset!("scientific-charts.js", "text/javascript; charset=utf-8"),
+    asset!("clipboard.js", "text/javascript; charset=utf-8"),
     asset!("app.js", "text/javascript; charset=utf-8"),
     asset!("analytics.wasm", "application/wasm"),
     asset!("favicon.svg", "image/svg+xml"),

@@ -5,6 +5,7 @@ const root = new URL("../", import.meta.url);
 const html = readFileSync(new URL("static/index.html", root), "utf8");
 const app = readFileSync(new URL("static/app.js", root), "utf8");
 const figures = readFileSync(new URL("static/scientific-charts.js", root), "utf8");
+const clipboard = readFileSync(new URL("static/clipboard.js", root), "utf8");
 const i18nSource = readFileSync(new URL("static/i18n.js", root), "utf8");
 const assetSource = readFileSync(new URL("internal/assets/mod.rs", root), "utf8");
 
@@ -31,7 +32,7 @@ vm.runInNewContext(i18nSource, sandbox, { filename: "static/i18n.js" });
 const i18n = sandbox.window.LogArkI18n;
 requireCondition(i18n, "i18n API was not initialized");
 
-const codeKeys = [...`${app}\n${figures}`.matchAll(/\bt\("([^"]+)"/g)].map((match) => match[1]);
+const codeKeys = [...`${app}\n${figures}\n${clipboard}`.matchAll(/\b(?:t|label)\("([^"]+)"/g)].map((match) => match[1]);
 const markupKeys = [...html.matchAll(/data-i18n(?:-(?:aria-label|content|placeholder|title))?="([^"]+)"/g)]
   .map((match) => match[1]);
 const translationKeys = [...new Set([...codeKeys, ...markupKeys])];
@@ -42,7 +43,7 @@ for (const locale of ["zh-CN", "en"]) {
   requireCondition(missing.length === 0, `${locale} is missing translations: ${missing.join(", ")}`);
   i18n.setLocale(locale);
   for (const key of keyAnalysisKeys) {
-    const text = i18n.t(key, { shown: 5, total: 20, errors: 12, all: 18, share: "66.7%", rate: "20%" });
+    const text = i18n.t(key, { shown: 5, total: 20, errors: 12, all: 18, share: "66.7%", rate: "20%", count: 12, signature: "POST /fixture · HTTP 429 · RATE_LIMIT" });
     requireCondition(text.trim() && text !== key && !/\{[a-zA-Z0-9_]+\}/.test(text), `${locale}: ${key} must resolve all variables`);
     if (locale === "en") requireCondition(!/[\p{Script=Han}]/u.test(text), `${key} is not translated into English`);
   }
@@ -84,6 +85,10 @@ requireCondition(
   "HTML references local assets absent from the compiled release",
 );
 requireCondition(embeddedAssets.has("analytics.wasm"), "compiled release is missing analytics.wasm");
+requireCondition(
+  html.indexOf('/assets/clipboard.js') < html.indexOf('/assets/app.js'),
+  "clipboard.js must load before app.js",
+);
 requireCondition(
   html.indexOf('/assets/i18n.js') < html.indexOf('/assets/app.js'),
   "i18n.js must load before app.js",

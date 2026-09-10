@@ -10,7 +10,7 @@ use std::{
 };
 
 use redis::aio::MultiplexedConnection;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::mysql::MySqlConnectOptions;
 use tokio::sync::Mutex;
@@ -30,8 +30,8 @@ pub struct RedisReportCache {
 }
 
 /// A hit carries its remaining lifetime, so an L1 cache cannot renew old data.
-pub struct CachedReport {
-    pub payload: DashboardResponse,
+pub struct CachedReport<T = DashboardResponse> {
+    pub payload: T,
     pub completed_at: SystemTime,
     pub remaining_ttl: Duration,
 }
@@ -84,6 +84,13 @@ impl RedisReportCache {
     }
 
     pub async fn get(&self, report_key: &str) -> Option<CachedReport> {
+        self.get_typed(report_key).await
+    }
+
+    pub async fn get_typed<T: DeserializeOwned>(
+        &self,
+        report_key: &str,
+    ) -> Option<CachedReport<T>> {
         let started = Instant::now();
         let key = self.key(report_key);
         let operation = async {
@@ -108,7 +115,7 @@ impl RedisReportCache {
             }
         };
         let decode_started = Instant::now();
-        let mut report = decode_hit(
+        let mut report = decode_typed_hit(
             bytes.as_deref()?,
             pttl,
             SystemTime::now(),
@@ -127,10 +134,10 @@ impl RedisReportCache {
 
     /// Cache a successful report. The caller supplies the computation completion
     /// time; serialization, connection setup, and writes do not extend its TTL.
-    pub async fn put(
+    pub async fn put<T: Serialize>(
         &self,
         report_key: &str,
-        payload: &DashboardResponse,
+        payload: &T,
         completed_at: SystemTime,
     ) -> bool {
         let Some(completed_at_ms) = unix_millis(completed_at) else {
@@ -234,6 +241,7 @@ fn database_namespace(database_url: &str) -> Option<String> {
     ))
 }
 
+#[cfg(test)]
 fn decode_hit(
     bytes: &[u8],
     redis_ttl_ms: i64,
@@ -241,10 +249,20 @@ fn decode_hit(
     elapsed: Duration,
     configured_ttl: Duration,
 ) -> Option<CachedReport> {
+    decode_typed_hit(bytes, redis_ttl_ms, now, elapsed, configured_ttl)
+}
+
+fn decode_typed_hit<T: DeserializeOwned>(
+    bytes: &[u8],
+    redis_ttl_ms: i64,
+    now: SystemTime,
+    elapsed: Duration,
+    configured_ttl: Duration,
+) -> Option<CachedReport<T>> {
     if bytes.len() > MAX_ENVELOPE_BYTES || redis_ttl_ms <= 0 {
         return None;
     }
-    let envelope: Envelope<DashboardResponse> = serde_json::from_slice(bytes).ok()?;
+    let envelope: Envelope<T> = serde_json::from_slice(bytes).ok()?;
     let now_ms = unix_millis(now)?;
     if envelope.schema_version != SCHEMA_VERSION || envelope.completed_at_ms > now_ms {
         return None;
@@ -314,6 +332,63 @@ mod tests {
 
     fn at(ms: u64) -> SystemTime {
         UNIX_EPOCH + Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn typed_route_cache_round_trip_does_not_alias_dashboard_payloads() {
+        let payload = crate::model::KeyRouteErrorsResponse {
+            window: crate::model::DashboardWindow {
+                from_ts: 1000,
+                to_ts: 2000,
+                hours: 1,
+                bucket_ms: 300000,
+            },
+            api_key: "Synthetic-key ".into(),
+            path: "/Route_% ".into(),
+            method: Some("POST".into()),
+            task_type: None,
+            patterns: vec![],
+            coverage: crate::model::FailurePatternCoverage {
+                aggregation_scope: "exact_key_route_window".into(),
+                group_by: ["method", "path", "status_code", "error_code"].map(str::to_owned),
+                total_patterns: 0,
+                returned_patterns: 0,
+                returned_error_requests: 0,
+                total_error_requests: 0,
+                covered_error_rate: 0.0,
+                truncated: false,
+                limit: 12,
+                representative_strategy: "highest_id_per_pattern".into(),
+            },
+        };
+        let bytes = serde_json::to_vec(&Envelope {
+            schema_version: SCHEMA_VERSION,
+            completed_at_ms: 10000,
+            expires_at_ms: 70000,
+            payload: &payload,
+        })
+        .unwrap();
+        let hit = decode_typed_hit::<crate::model::KeyRouteErrorsResponse>(
+            &bytes,
+            60000,
+            at(20000),
+            Duration::ZERO,
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(hit.payload).unwrap(),
+            serde_json::to_value(payload).unwrap()
+        );
+        assert_eq!(hit.remaining_ttl, Duration::from_secs(50));
+        assert!(decode_hit(
+            &bytes,
+            60000,
+            at(20000),
+            Duration::ZERO,
+            Duration::from_secs(60)
+        )
+        .is_none());
     }
 
     #[test]

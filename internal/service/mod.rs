@@ -1,4 +1,6 @@
 mod dashboard_cache;
+mod key_route;
+pub use key_route::KeyRouteError;
 
 use std::time::{Duration, Instant, SystemTime};
 
@@ -11,7 +13,8 @@ use crate::{
         ApiKeyAnalysis, ApiKeyFailure, ApiKeyRoute, AuditRecordDetail, AuditRecordSummary,
         BidReport, BidReportWindow, BidStatusCodeStat, BidWatchItem, DashboardQuery,
         DashboardResponse, DashboardSummary, DashboardWindow, ErrorRateSlice, FailurePattern,
-        FailurePatternCoverage, MetricSlice, RecordListQuery, RecordListResponse, TimelinePoint,
+        FailurePatternCoverage, KeyRouteErrorsResponse, MetricSlice, RecordListQuery,
+        RecordListResponse, TimelinePoint,
     },
     redis_cache::RedisReportCache,
 };
@@ -21,6 +24,7 @@ pub struct AuditAnalyticsService {
     pool: MySqlPool,
     config: Config,
     dashboard_cache: std::sync::Arc<DashboardCache<DashboardResponse>>,
+    key_route_cache: std::sync::Arc<DashboardCache<KeyRouteErrorsResponse>>,
     redis_cache: Option<RedisReportCache>,
 }
 
@@ -95,6 +99,7 @@ impl AuditAnalyticsService {
             pool,
             config,
             dashboard_cache: DashboardCache::new(64, concurrent_reports, query_timeout),
+            key_route_cache: DashboardCache::new(32, 1, query_timeout.min(Duration::from_secs(30))),
             redis_cache,
         }
     }
@@ -708,30 +713,7 @@ impl AuditAnalyticsService {
             .build_query_as::<FailurePatternRow>()
             .fetch_all(&self.pool)
             .await?;
-        // The scalar totals share the statement snapshot with the selected
-        // groups and examples. No returned groups means an empty error window.
-        let (total_patterns, total_error_requests) = rows
-            .first()
-            .map(|row| (row.total_patterns, row.total_error_requests))
-            .unwrap_or((0, 0));
-        let patterns: Vec<_> = rows
-            .into_iter()
-            .map(|row| FailurePattern {
-                method: row.representative.method.clone(),
-                path: row.representative.path.clone(),
-                status_code: row.representative.status_code,
-                error_code: row.normalized_error_code,
-                count: row.count,
-                error_share: percentage(row.count, total_error_requests),
-                first_seen_ts: row.first_seen_ts,
-                last_seen_ts: row.last_seen_ts,
-                avg_duration_ms: row.avg_duration_ms,
-                max_duration_ms: i32::try_from(row.max_duration_ms).unwrap_or(i32::MAX),
-                representative: row.representative,
-            })
-            .collect();
-        let coverage = failure_pattern_coverage(&patterns, total_patterns, total_error_requests);
-        Ok((patterns, coverage))
+        Ok(failure_patterns_from_rows(rows))
     }
 
     async fn fetch_top_error_dimension(
@@ -980,9 +962,46 @@ fn api_key_analysis_from_rows(
     (analysis, legacy.into_iter().map(|(_, item)| item).collect())
 }
 
+fn failure_patterns_from_rows(
+    rows: Vec<FailurePatternRow>,
+) -> (Vec<FailurePattern>, FailurePatternCoverage) {
+    // The scalar totals share the statement snapshot with the selected
+    // groups and examples. No returned groups means an empty error window.
+    let (total_patterns, total_error_requests) = rows
+        .first()
+        .map(|row| (row.total_patterns, row.total_error_requests))
+        .unwrap_or((0, 0));
+    let patterns: Vec<_> = rows
+        .into_iter()
+        .map(|row| FailurePattern {
+            method: row.representative.method.clone(),
+            path: row.representative.path.clone(),
+            status_code: row.representative.status_code,
+            error_code: row.normalized_error_code,
+            count: row.count,
+            error_share: percentage(row.count, total_error_requests),
+            first_seen_ts: row.first_seen_ts,
+            last_seen_ts: row.last_seen_ts,
+            avg_duration_ms: row.avg_duration_ms,
+            max_duration_ms: i32::try_from(row.max_duration_ms).unwrap_or(i32::MAX),
+            representative: row.representative,
+        })
+        .collect();
+    let coverage = failure_pattern_coverage(&patterns, total_patterns, total_error_requests);
+    (patterns, coverage)
+}
+
 fn failure_patterns_query<'a>(
     window: &AnalyticsWindow,
     filter: &'a CommonFilter,
+) -> QueryBuilder<'a, MySql> {
+    failure_patterns_query_with_exact_path(window, filter, None)
+}
+
+fn failure_patterns_query_with_exact_path<'a>(
+    window: &AnalyticsWindow,
+    filter: &'a CommonFilter,
+    exact_path: Option<&'a str>,
 ) -> QueryBuilder<'a, MySql> {
     // Aggregate the entire filtered window before applying the display limit.
     // Window totals operate on those groups before LIMIT, avoiding a second
@@ -1008,7 +1027,7 @@ fn failure_patterns_query<'a>(
          CAST(COUNT(*) OVER () AS SIGNED) AS total_patterns, \
          CAST(SUM(COUNT(*)) OVER () AS SIGNED) AS total_error_requests",
     );
-    push_failure_pattern_grouping(&mut qb, window, filter);
+    push_failure_pattern_grouping(&mut qb, window, filter, exact_path);
     qb.push(
         " ORDER BY count DESC, last_seen_ts DESC, BINARY MIN(method) ASC, BINARY MIN(path) ASC, \
          status_code ASC, BINARY MIN(NULLIF(TRIM(error_code), '')) ASC LIMIT ",
@@ -1026,6 +1045,7 @@ fn push_failure_pattern_grouping<'a>(
     qb: &mut QueryBuilder<'a, MySql>,
     window: &AnalyticsWindow,
     filter: &'a CommonFilter,
+    exact_path: Option<&'a str>,
 ) {
     qb.push(" FROM api_audit_log WHERE request_ts BETWEEN ")
         .push_bind(window.from_ts)
@@ -1033,6 +1053,14 @@ fn push_failure_pattern_grouping<'a>(
         .push_bind(window.to_ts)
         .push(" AND status_code <> 200");
     push_common_filters(qb, filter);
+    if let Some(path) = exact_path {
+        // Keep the indexable comparison and then require the exact byte value,
+        // including case, trailing spaces, and literal wildcard characters.
+        qb.push(" AND path = ")
+            .push_bind(path)
+            .push(" AND BINARY path = BINARY ")
+            .push_bind(path);
+    }
     // HTTP paths and application error codes are case-sensitive signatures even
     // when the source table uses the default case-insensitive MySQL collation.
     qb.push(" GROUP BY BINARY method, BINARY path, status_code, BINARY ")

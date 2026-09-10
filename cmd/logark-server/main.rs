@@ -33,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(assets::routes())
         .route("/health", get(handler::health))
         .route("/api/dashboard", get(handler::dashboard))
+        .route("/api/key-route-errors", get(handler::key_route_errors))
         .route("/api/records", get(handler::list_records))
         .route("/api/records/:id", get(handler::get_record))
         .route(
@@ -41,7 +42,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/records/uuid/:uuid", get(handler::get_record_by_uuid))
         .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<axum::body::Body>| {
+            // Query strings may contain API keys; never put them in HTTP spans.
+            tracing::debug_span!("http_request", method = %request.method(), path = request.uri().path())
+        }))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&cfg.addr).await?;

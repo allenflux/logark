@@ -11,10 +11,12 @@ Web 分析页统一把 `status_code = 200` 视为成功，把 `status_code != 20
 - 学术统计风格的接口散点图、接口失败 Pareto 图、Method 成功／失败构成图，标明坐标单位、统计分母与返回数据范围
 - 完整窗口内的高频失败模式、覆盖率及代表请求；支持次数、服务端失败、最大耗时排序
 - API Key 错误率排名及各 Key 的失败路由分布，页面显示完整 Key，可直接复制和筛选
+- 点击失败路由展开该 Key 的高频错误排行，按错误类型查看次数、占比及典型请求
 - 一键导出 Markdown 汇总报告，包含分析窗口、筛选条件、结论及样本标识
 - 高级筛选、其他维度及原始明细折叠展示，明细展开后才请求数据
 - Rust WebAssembly 分析模块，加载失败时自动使用相同算法的 JavaScript 实现
 - `GET /api/dashboard` 非 200 错误聚合分析接口
+- `GET /api/key-route-errors` 指定 Key、精确路由和报告时间范围内的高频错误与代表请求
 - `GET /api/records` 最近记录列表，支持 `non_200=true` 并使用游标翻页
 - `GET /api/records/:id` 按主键查询详情
 - `GET /api/records/request/:request_id` 按 `request_id` 查询详情
@@ -91,6 +93,12 @@ docker compose -f docker-compose.yml -f docker-compose.redis.yml up -d --build l
 
 新查询替换原 API Key 查询，只扫描一次现有报表覆盖索引所含字段，并在限制排名前用窗口函数计算各级分母；兼容字段 `top_error_api_keys` 仍返回失败次数最多的 8 个 Key。查询与分母来自同一 SQL 快照。Redis 报告缓存版本已更新，旧报告不会缺少该字段。页面、复制和详情显示明文 Key；导出的 Markdown 报告只保留 Key 前后各 4 位，短 Key 完全隐藏。
 
+点击右侧路由的“查看 Top 错误”，按 HTTP 方法、状态码和业务错误码列出出现最多的 12 类错误。次数与占比来自该 Key 在这条精确路由内的全部非 200 请求，包含未展示的类型；路径前缀相似、大小写不同或其他 Key 的请求不会混入。每类可打开最新入库的代表请求，查看响应体、请求体及请求头。没有业务错误码时，同方法、同状态码的请求归为一类，需要通过响应内容进一步区分原因。
+
+明细接口要求 `api_key`、`path`、`from_ts`、`to_ts`，时间为报告返回的毫秒时间戳；可附带报告已应用的 `method` 和 `task_type`。明细只在点击时请求，使用固定报告时间范围，保留内存缓存、同范围请求合并及可选 Redis 缓存。切换语言或重复展开已加载路由不重复查询；新报告成功返回后清除页面旧明细。它不增加首页报表的查询分支，也不提前加载请求/响应正文。
+
+“复制特征”和“复制 Key”优先使用浏览器剪贴板接口；普通 HTTP 或权限不允许时尝试兼容复制，仍失败则显示已选中的只读文本供手动复制，不再把复制问题显示为报告加载失败。
+
 ## WebAssembly 开发与验证
 
 `static/analytics.wasm` 已随源码提供，构建服务时会与 HTML、脚本、样式和图标一起嵌入可执行文件。修改 Rust 分析算法后重新构建：
@@ -104,11 +112,13 @@ node scripts/check-static.mjs
 cargo test
 ```
 
-浏览器回归测试使用本地模拟数据，无需数据库；安装 `playwright` 并准备 Chrome 后运行 `node scripts/test-report.mjs`。可通过 `PLAYWRIGHT_MODULE` 指定模块位置，通过 `CHROME_EXECUTABLE` 指定浏览器。
+浏览器回归测试使用本地模拟数据，无需数据库；安装 `playwright` 并准备 Chrome 后运行 `node scripts/test-report.mjs`。独立剪贴板兼容测试为 `node scripts/test-clipboard.mjs`，覆盖普通 HTTP、权限拒绝及手动复制。可通过 `PLAYWRIGHT_MODULE` 指定模块位置，通过 `CHROME_EXECUTABLE` 指定浏览器。
 
 数据库集成测试默认跳过；准备独立临时数据库并设置 `LOGARK_TEST_DATABASE_URL` 后，运行 `cargo test failure_patterns_execute_against_full_window_fixture -- --ignored`。该测试使用临时表，覆盖完整窗口、分组归一化、大小写差异和样本覆盖率。
 
 API Key 的隔离数据库测试为 `cargo test api_key_analysis_preserves_full_denominators_and_exact_identities -- --ignored`，使用会话临时表，验证大小写与尾空格身份、HTML 字符串、空白 Key、全部筛选、零失败、Top 20 / Top 5 截断及完整分母。已在 MariaDB 11.4.13、`ONLY_FULL_GROUP_BY` 模式验证；测试不连接线上数据库。
+
+路由错误明细测试为 `cargo test key_route_patterns_preserve_scope_full_denominators_and_newest_samples -- --ignored`，使用同类隔离数据库，验证精确 Key/路由、字面通配符、时间及方法/任务筛选、Top 12 的完整分母和样本归属。
 
 算法、回退行为和 ABI 见 [analytics-wasm/README.md](analytics-wasm/README.md)。计算在浏览器本地执行，WASM 与 JavaScript 使用一致的数值规则。
 

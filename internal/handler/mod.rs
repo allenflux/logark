@@ -7,8 +7,8 @@ use axum::{
 use serde_json::json;
 
 use crate::{
-    model::{DashboardQuery, HealthResponse, RecordListQuery},
-    service::AuditAnalyticsService,
+    model::{DashboardQuery, HealthResponse, KeyRouteErrorsQuery, RecordListQuery},
+    service::{AuditAnalyticsService, KeyRouteError},
 };
 
 #[derive(Clone)]
@@ -53,6 +53,22 @@ pub async fn list_records(
     Ok(Json(json!(payload)))
 }
 
+pub async fn key_route_errors(
+    State(state): State<AppState>,
+    Query(query): Query<KeyRouteErrorsQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let payload =
+        state
+            .audit_service
+            .key_route_errors(query)
+            .await
+            .map_err(|error| match error {
+                KeyRouteError::Invalid(message) => AppError::BadRequest(message.into()),
+                KeyRouteError::Query(error) => AppError::Internal(error),
+            })?;
+    Ok(Json(json!(payload)))
+}
+
 pub async fn get_record(
     State(state): State<AppState>,
     Path(id): Path<u64>,
@@ -90,6 +106,7 @@ pub async fn get_record_by_uuid(
 pub enum AppError {
     Internal(anyhow::Error),
     NotFound(String),
+    BadRequest(String),
 }
 
 impl<E> From<E> for AppError
@@ -114,6 +131,9 @@ impl IntoResponse for AppError {
             }
             AppError::NotFound(message) => {
                 (StatusCode::NOT_FOUND, Json(json!({ "error": message }))).into_response()
+            }
+            AppError::BadRequest(message) => {
+                (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
             }
         }
     }
@@ -154,6 +174,64 @@ mod health_tests {
         AppState {
             audit_service: AuditAnalyticsService::new(pool, config),
         }
+    }
+
+    #[tokio::test]
+    async fn route_validation_returns_400_before_touching_a_closed_database() -> anyhow::Result<()>
+    {
+        let pool =
+            MySqlPoolOptions::new().connect_lazy("mysql://localhost/route_validation_test")?;
+        pool.close().await;
+        let app_state = state(pool);
+        let valid = KeyRouteErrorsQuery {
+            api_key: Some("fixture-key".into()),
+            path: Some("/route".into()),
+            from_ts: Some(1000),
+            to_ts: Some(2000),
+            method: None,
+            task_type: None,
+        };
+        for query in [
+            KeyRouteErrorsQuery {
+                api_key: None,
+                ..valid.clone()
+            },
+            KeyRouteErrorsQuery {
+                api_key: Some(" \t".into()),
+                ..valid.clone()
+            },
+            KeyRouteErrorsQuery {
+                path: None,
+                ..valid.clone()
+            },
+            KeyRouteErrorsQuery {
+                from_ts: None,
+                ..valid.clone()
+            },
+            KeyRouteErrorsQuery {
+                from_ts: Some(2001),
+                ..valid.clone()
+            },
+            KeyRouteErrorsQuery {
+                to_ts: Some(i64::MAX),
+                ..valid.clone()
+            },
+            KeyRouteErrorsQuery {
+                from_ts: Some(0),
+                to_ts: Some(169 * 3600000),
+                ..valid.clone()
+            },
+        ] {
+            let response = key_route_errors(State(app_state.clone()), Query(query))
+                .await
+                .into_response();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+            let value: serde_json::Value = serde_json::from_slice(&body)?;
+            assert!(value["error"].is_string());
+            assert!(!value["error"].as_str().unwrap().contains("fixture-key"));
+        }
+        Ok(())
     }
 
     #[tokio::test]

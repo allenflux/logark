@@ -58,6 +58,27 @@ pub struct DashboardQuery {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct KeyRouteErrorsQuery {
+    pub api_key: Option<String>,
+    pub path: Option<String>,
+    pub from_ts: Option<i64>,
+    pub to_ts: Option<i64>,
+    pub method: Option<String>,
+    pub task_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyRouteErrorsResponse {
+    pub window: DashboardWindow,
+    pub api_key: String,
+    pub path: String,
+    pub method: Option<String>,
+    pub task_type: Option<String>,
+    pub patterns: Vec<FailurePattern>,
+    pub coverage: FailurePatternCoverage,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct RecordListQuery {
     pub hours: Option<u32>,
     pub limit: Option<u32>,
