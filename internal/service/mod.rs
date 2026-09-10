@@ -8,10 +8,10 @@ use sqlx::{MySql, MySqlPool, QueryBuilder, Row};
 use crate::{
     config::Config,
     model::{
-        AuditRecordDetail, AuditRecordSummary, BidReport, BidReportWindow, BidStatusCodeStat,
-        BidWatchItem, DashboardQuery, DashboardResponse, DashboardSummary, DashboardWindow,
-        ErrorRateSlice, FailurePattern, FailurePatternCoverage, MetricSlice, RecordListQuery,
-        RecordListResponse, TimelinePoint,
+        ApiKeyAnalysis, ApiKeyFailure, ApiKeyRoute, AuditRecordDetail, AuditRecordSummary,
+        BidReport, BidReportWindow, BidStatusCodeStat, BidWatchItem, DashboardQuery,
+        DashboardResponse, DashboardSummary, DashboardWindow, ErrorRateSlice, FailurePattern,
+        FailurePatternCoverage, MetricSlice, RecordListQuery, RecordListResponse, TimelinePoint,
     },
     redis_cache::RedisReportCache,
 };
@@ -42,6 +42,27 @@ struct CommonFilter {
 
 const FAILURE_PATTERN_LIMIT: usize = 12;
 const FAILURE_PATTERN_ERROR_CODE: &str = "NULLIF(TRIM(error_code), '')";
+const API_KEY_LIMIT: usize = 20;
+const API_KEY_ROUTE_LIMIT: usize = 5;
+const LEGACY_API_KEY_LIMIT: usize = 8;
+
+#[derive(sqlx::FromRow)]
+struct ApiKeyAnalysisRow {
+    api_key: String,
+    path: String,
+    route_requests: i64,
+    route_errors: i64,
+    key_requests: i64,
+    key_errors: i64,
+    affected_routes: i64,
+    key_rank: i64,
+    failure_count_rank: i64,
+    route_rank: i64,
+    total_keys: i64,
+    failing_keys: i64,
+    total_requests: i64,
+    error_requests: i64,
+}
 
 #[derive(sqlx::FromRow)]
 struct FailurePatternRow {
@@ -77,7 +98,7 @@ impl AuditAnalyticsService {
         let filter = CommonFilter {
             path: normalize_str(query.path),
             method: normalize_str(query.method).map(|v| v.to_uppercase()),
-            api_key: normalize_str(query.api_key),
+            api_key: normalize_api_key(query.api_key),
             task_type: normalize_str(query.task_type),
         };
         let cache_key = dashboard_cache_key(&window, &filter);
@@ -121,7 +142,7 @@ impl AuditAnalyticsService {
             top_error_paths,
             error_status_distribution,
             error_method_distribution,
-            top_error_api_keys,
+            (api_key_analysis, top_error_api_keys),
             top_error_task_types,
             (failure_patterns, failure_pattern_coverage),
             latest_errors,
@@ -137,7 +158,7 @@ impl AuditAnalyticsService {
                 "methods",
                 self.fetch_error_method_distribution(window, filter)
             ),
-            timed_dashboard_query("api_keys", self.fetch_top_error_api_keys(window, filter)),
+            timed_dashboard_query("api_keys", self.fetch_api_key_analysis(window, filter)),
             timed_dashboard_query(
                 "task_types",
                 self.fetch_top_error_task_types(window, filter)
@@ -162,6 +183,7 @@ impl AuditAnalyticsService {
             error_method_distribution,
             top_error_paths,
             top_error_api_keys,
+            api_key_analysis,
             top_error_task_types,
             failure_patterns,
             failure_pattern_coverage,
@@ -205,8 +227,11 @@ impl AuditAnalyticsService {
         if let Some(method) = normalize_str(query.method) {
             qb.push(" AND method = ").push_bind(method.to_uppercase());
         }
-        if let Some(api_key) = normalize_str(query.api_key) {
-            qb.push(" AND api_key = ").push_bind(api_key);
+        if let Some(api_key) = normalize_api_key(query.api_key) {
+            qb.push(" AND api_key = ")
+                .push_bind(api_key.clone())
+                .push(" AND BINARY api_key = BINARY ")
+                .push_bind(api_key);
         }
         push_record_status_filter(&mut qb, query.status_code, query.non_200.unwrap_or(false));
         if let Some(task_type) = normalize_str(query.task_type) {
@@ -476,7 +501,7 @@ impl AuditAnalyticsService {
              CAST(COALESCE(AVG(duration_ms), 0) AS DOUBLE) AS avg_duration_ms, \
              CAST(COALESCE(AVG(CASE WHEN status_code <> 200 THEN duration_ms END), 0) AS DOUBLE) AS avg_error_duration_ms, \
              CAST(COALESCE(MAX(duration_ms), 0) AS SIGNED) AS max_duration_ms, \
-             CAST(COUNT(DISTINCT NULLIF(api_key, '')) AS SIGNED) AS unique_api_keys, \
+             CAST(COUNT(DISTINCT CASE WHEN api_key REGEXP '[^[:space:]]' THEN BINARY api_key END) AS SIGNED) AS unique_api_keys, \
              CAST(COUNT(DISTINCT NULLIF(task_id, '')) AS SIGNED) AS unique_task_ids, \
              CAST(COUNT(DISTINCT CASE WHEN status_code <> 200 THEN NULLIF(path, '') END) AS SIGNED) AS affected_paths \
              FROM api_audit_log WHERE request_ts BETWEEN ",
@@ -638,13 +663,16 @@ impl AuditAnalyticsService {
             .await
     }
 
-    async fn fetch_top_error_api_keys(
+    async fn fetch_api_key_analysis(
         &self,
         window: &AnalyticsWindow,
         filter: &CommonFilter,
-    ) -> anyhow::Result<Vec<ErrorRateSlice>> {
-        self.fetch_top_error_dimension(window, filter, "api_key", 8)
-            .await
+    ) -> anyhow::Result<(ApiKeyAnalysis, Vec<ErrorRateSlice>)> {
+        let rows = api_key_analysis_query(window, filter)
+            .build_query_as::<ApiKeyAnalysisRow>()
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(api_key_analysis_from_rows(rows))
     }
 
     async fn fetch_latest_errors(
@@ -833,6 +861,124 @@ fn p95_duration_query<'a>(
     qb
 }
 
+fn api_key_analysis_query<'a>(
+    window: &AnalyticsWindow,
+    filter: &'a CommonFilter,
+) -> QueryBuilder<'a, MySql> {
+    // One scan of narrow indexed columns. Subsequent window operations work on
+    // key/route groups, and every denominator precedes either ranking limit.
+    // Keep original bytes for identity: trimming only decides whether a key is blank.
+    let mut qb = QueryBuilder::<MySql>::new(
+        "WITH route_counts AS (\
+         SELECT BINARY api_key AS api_key, BINARY path AS path, \
+         CAST(COUNT(*) AS SIGNED) AS route_requests, \
+         CAST(SUM(status_code <> 200) AS SIGNED) AS route_errors \
+         FROM api_audit_log",
+    );
+    if filter.api_key.is_none() {
+        // IS NOT NULL alone can otherwise choose a non-covering key index.
+        qb.push(" IGNORE INDEX (idx_api_key_request_ts)");
+    }
+    qb.push(" WHERE request_ts BETWEEN ")
+        .push_bind(window.from_ts)
+        .push(" AND ")
+        .push_bind(window.to_ts)
+        .push(" AND api_key IS NOT NULL AND api_key REGEXP '[^[:space:]]'");
+    push_common_filters(&mut qb, filter);
+    qb.push(
+        " GROUP BY BINARY api_key, BINARY path), \
+         key_routes AS (SELECT route_counts.*, \
+         CAST(SUM(route_requests) OVER (PARTITION BY api_key) AS SIGNED) AS key_requests, \
+         CAST(SUM(route_errors) OVER (PARTITION BY api_key) AS SIGNED) AS key_errors, \
+         CAST(SUM(route_errors > 0) OVER (PARTITION BY api_key) AS SIGNED) AS affected_routes, \
+         CAST(ROW_NUMBER() OVER (PARTITION BY api_key \
+           ORDER BY route_errors DESC, route_requests DESC, path ASC) AS SIGNED) AS route_rank \
+         FROM route_counts), \
+         ranked AS (SELECT key_routes.*, \
+         CAST(DENSE_RANK() OVER (ORDER BY \
+           CAST(key_errors AS DECIMAL(40,20)) / key_requests DESC, \
+           key_errors DESC, key_requests DESC, api_key ASC) AS SIGNED) AS key_rank, \
+         CAST(DENSE_RANK() OVER (ORDER BY key_errors DESC, key_requests DESC, api_key ASC) \
+           AS SIGNED) AS failure_count_rank, \
+         CAST(SUM(route_rank = 1) OVER () AS SIGNED) AS total_keys, \
+         CAST(SUM(route_rank = 1 AND key_errors > 0) OVER () AS SIGNED) AS failing_keys, \
+         CAST(SUM(CASE WHEN route_rank = 1 THEN key_requests ELSE 0 END) OVER () AS SIGNED) AS total_requests, \
+         CAST(SUM(CASE WHEN route_rank = 1 THEN key_errors ELSE 0 END) OVER () AS SIGNED) AS error_requests \
+         FROM key_routes) \
+         SELECT CONVERT(api_key USING utf8mb4) AS api_key, CONVERT(path USING utf8mb4) AS path, \
+         route_requests, route_errors, key_requests, key_errors, affected_routes, \
+         key_rank, failure_count_rank, route_rank, total_keys, failing_keys, total_requests, error_requests \
+         FROM ranked WHERE (key_rank <= ",
+    )
+    .push_bind(API_KEY_LIMIT as i64)
+    .push(" OR failure_count_rank <= ")
+    .push_bind(LEGACY_API_KEY_LIMIT as i64)
+    .push(") AND route_rank <= ")
+    .push_bind(API_KEY_ROUTE_LIMIT as i64)
+    .push(" ORDER BY key_rank ASC, route_rank ASC");
+    qb
+}
+
+fn api_key_analysis_from_rows(
+    rows: Vec<ApiKeyAnalysisRow>,
+) -> (ApiKeyAnalysis, Vec<ErrorRateSlice>) {
+    let mut analysis = ApiKeyAnalysis {
+        total_keys: rows.first().map_or(0, |row| row.total_keys),
+        failing_keys: rows.first().map_or(0, |row| row.failing_keys),
+        returned_keys: 0,
+        total_requests: rows.first().map_or(0, |row| row.total_requests),
+        error_requests: rows.first().map_or(0, |row| row.error_requests),
+        limit: API_KEY_LIMIT,
+        route_limit: API_KEY_ROUTE_LIMIT,
+        keys: Vec::new(),
+    };
+    let mut legacy = Vec::new();
+    for row in rows {
+        if row.key_errors == 0 {
+            continue;
+        }
+        if row.route_rank == 1 && row.failure_count_rank <= LEGACY_API_KEY_LIMIT as i64 {
+            legacy.push((
+                row.failure_count_rank,
+                ErrorRateSlice {
+                    label: row.api_key.clone(),
+                    total_requests: row.key_requests,
+                    error_requests: row.key_errors,
+                    error_rate: percentage(row.key_errors, row.key_requests),
+                },
+            ));
+        }
+        if row.key_rank > API_KEY_LIMIT as i64 || row.route_errors == 0 {
+            continue;
+        }
+        if row.route_rank == 1 {
+            analysis.keys.push(ApiKeyFailure {
+                api_key: row.api_key,
+                total_requests: row.key_requests,
+                error_requests: row.key_errors,
+                error_rate: percentage(row.key_errors, row.key_requests),
+                error_share: percentage(row.key_errors, analysis.error_requests),
+                affected_routes: row.affected_routes,
+                routes: Vec::new(),
+                returned_route_errors: 0,
+            });
+        }
+        if let Some(key) = analysis.keys.last_mut() {
+            key.returned_route_errors += row.route_errors;
+            key.routes.push(ApiKeyRoute {
+                path: row.path,
+                total_requests: row.route_requests,
+                error_requests: row.route_errors,
+                error_rate: percentage(row.route_errors, row.route_requests),
+                error_share: percentage(row.route_errors, row.key_errors),
+            });
+        }
+    }
+    analysis.returned_keys = analysis.keys.len();
+    legacy.sort_unstable_by_key(|(rank, _)| *rank);
+    (analysis, legacy.into_iter().map(|(_, item)| item).collect())
+}
+
 fn failure_patterns_query<'a>(
     window: &AnalyticsWindow,
     filter: &'a CommonFilter,
@@ -922,7 +1068,10 @@ fn push_common_filters<'a>(qb: &mut QueryBuilder<'a, MySql>, filter: &'a CommonF
         qb.push(" AND method = ").push_bind(method);
     }
     if let Some(api_key) = &filter.api_key {
-        qb.push(" AND api_key = ").push_bind(api_key);
+        qb.push(" AND api_key = ")
+            .push_bind(api_key)
+            .push(" AND BINARY api_key = BINARY ")
+            .push_bind(api_key);
     }
     if let Some(task_type) = &filter.task_type {
         qb.push(" AND task_type = ").push_bind(task_type);
@@ -950,6 +1099,10 @@ fn normalize_str(value: Option<String>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+fn normalize_api_key(value: Option<String>) -> Option<String> {
+    value.filter(|key| !key.trim().is_empty())
 }
 
 fn percentage(part: i64, total: i64) -> f64 {
@@ -1172,7 +1325,7 @@ mod tests {
         let patterns = failure_patterns_query(&window, &filter);
         let expected_grouping = " FROM api_audit_log WHERE request_ts BETWEEN ? AND ? \
             AND status_code <> 200 AND path LIKE CONCAT(?, '%') AND method = ? \
-            AND api_key = ? AND task_type = ? GROUP BY BINARY method, BINARY path, status_code, \
+            AND api_key = ? AND BINARY api_key = BINARY ? AND task_type = ? GROUP BY BINARY method, BINARY path, status_code, \
             BINARY NULLIF(TRIM(error_code), '')";
 
         assert!(patterns.sql().contains(expected_grouping));
@@ -1206,6 +1359,243 @@ mod tests {
         assert_eq!(coverage.returned_error_requests, 0);
         assert_eq!(coverage.covered_error_rate, 0.0);
         assert!(!coverage.truncated);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires LOGARK_TEST_DATABASE_URL pointing to a disposable MariaDB instance"]
+    async fn api_key_analysis_preserves_full_denominators_and_exact_identities(
+    ) -> anyhow::Result<()> {
+        use sqlx::{Connection, MySqlConnection};
+
+        let mut connection =
+            MySqlConnection::connect(&std::env::var("LOGARK_TEST_DATABASE_URL")?).await?;
+        sqlx::query("SET SESSION sql_mode = CONCAT(@@sql_mode, ',ONLY_FULL_GROUP_BY')")
+            .execute(&mut connection)
+            .await?;
+        // Session-local fixture: no persistent application table is modified.
+        sqlx::query(
+            "CREATE TEMPORARY TABLE api_audit_log (\
+             request_ts BIGINT NOT NULL DEFAULT 2000, api_key VARCHAR(255), \
+             path VARCHAR(255) NOT NULL DEFAULT '/v1/A', method VARCHAR(16) DEFAULT 'POST', \
+             status_code SMALLINT NOT NULL DEFAULT 500, task_type VARCHAR(128) DEFAULT 'generation', \
+             INDEX idx_api_key_request_ts (api_key, request_ts)) \
+             DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+        )
+        .execute(&mut connection)
+        .await?;
+        let window = test_window();
+        let unfiltered = CommonFilter {
+            path: None,
+            method: None,
+            api_key: None,
+            task_type: None,
+        };
+        let load = |rows| api_key_analysis_from_rows(rows);
+        let empty = load(
+            api_key_analysis_query(&window, &unfiltered)
+                .build_query_as::<ApiKeyAnalysisRow>()
+                .fetch_all(&mut connection)
+                .await?,
+        );
+        assert_eq!(empty.0.total_keys, 0);
+        assert_eq!(empty.0.error_requests, 0);
+        assert!(empty.0.keys.is_empty());
+        assert!(empty.1.is_empty());
+
+        for (route, errors) in [
+            ("A", 7),
+            ("a", 6),
+            ("r2", 5),
+            ("r3", 4),
+            ("r4", 3),
+            ("r5", 2),
+            ("r6", 1),
+        ] {
+            for index in 0..errors * 2 {
+                sqlx::query(
+                    "INSERT INTO api_audit_log (api_key, path, status_code) VALUES ('focus', ?, ?)",
+                )
+                .bind(format!("/v1/{route}"))
+                .bind(if index < errors { 500_i16 } else { 200_i16 })
+                .execute(&mut connection)
+                .await?;
+            }
+        }
+        for _ in 0..10 {
+            sqlx::query("INSERT INTO api_audit_log (api_key, path, status_code) VALUES ('focus', '/v1/success', 200)")
+                .execute(&mut connection)
+                .await?;
+        }
+        sqlx::query(
+            "INSERT INTO api_audit_log (api_key, method, status_code) VALUES \
+             ('focus', 'GET', 201), ('focus', 'GET', 302), \
+             ('Focus', 'POST', 500), ('focus ', 'POST', 500), ('focus ', 'POST', 500), \
+             ('focus ', 'POST', 500), ('<img src=x onerror=alert(1)>', 'POST', 500), \
+             ('success', 'POST', 200), ('success', 'POST', 200), ('success', 'POST', 200), ('success', 'POST', 200), \
+             (NULL, 'POST', 500), ('', 'POST', 500), ('   ', 'POST', 500)",
+        )
+        .execute(&mut connection)
+        .await?;
+        sqlx::query("INSERT INTO api_audit_log (api_key) VALUES (?)")
+            .bind("\t\n")
+            .execute(&mut connection)
+            .await?;
+        let (analysis, legacy) = load(
+            api_key_analysis_query(&window, &unfiltered)
+                .build_query_as::<ApiKeyAnalysisRow>()
+                .fetch_all(&mut connection)
+                .await?,
+        );
+        assert_eq!(
+            (
+                analysis.total_keys,
+                analysis.failing_keys,
+                analysis.returned_keys
+            ),
+            (5, 4, 4)
+        );
+        assert_eq!((analysis.total_requests, analysis.error_requests), (77, 35));
+        assert_eq!(
+            analysis
+                .keys
+                .iter()
+                .map(|key| key.api_key.as_str())
+                .collect::<Vec<_>>(),
+            ["focus ", "<img src=x onerror=alert(1)>", "Focus", "focus"]
+        );
+        let focus = &analysis.keys[3];
+        assert_eq!(
+            (
+                focus.total_requests,
+                focus.error_requests,
+                focus.affected_routes
+            ),
+            (68, 30, 7)
+        );
+        assert_eq!(focus.routes.len(), 5);
+        assert_eq!(focus.returned_route_errors, 27);
+        assert!((focus.error_rate - 30.0 / 68.0 * 100.0).abs() < 1e-9);
+        assert!((focus.error_share - 30.0 / 35.0 * 100.0).abs() < 1e-9);
+        assert_eq!(
+            (
+                focus.routes[0].path.as_str(),
+                focus.routes[0].total_requests,
+                focus.routes[0].error_requests
+            ),
+            ("/v1/A", 16, 9)
+        );
+        assert_eq!(focus.routes[0].error_rate, 56.25);
+        assert_eq!(focus.routes[0].error_share, 30.0);
+        assert_eq!(focus.routes[1].path, "/v1/a");
+        assert_eq!(legacy[0].label, "focus");
+        assert_eq!(legacy[0].error_requests, 30);
+
+        // Every existing filter is applied before grouping. Exact byte comparison
+        // excludes both differently cased and trailing-space keys.
+        sqlx::query(
+            "INSERT INTO api_audit_log (api_key, path, task_type, request_ts) VALUES \
+             ('focus', '/v2/outside', 'generation', 2000), \
+             ('focus', '/v1/A', 'other-task', 2000), \
+             ('focus', '/v1/A', 'generation', 999), \
+             ('focus', '/v1/A', 'generation', 10001)",
+        )
+        .execute(&mut connection)
+        .await?;
+        let focused_filter = CommonFilter {
+            api_key: Some("focus".into()),
+            ..test_filter()
+        };
+        let (focused, _) = load(
+            api_key_analysis_query(&window, &focused_filter)
+                .build_query_as::<ApiKeyAnalysisRow>()
+                .fetch_all(&mut connection)
+                .await?,
+        );
+        assert_eq!(
+            (
+                focused.total_keys,
+                focused.failing_keys,
+                focused.returned_keys
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!((focused.total_requests, focused.error_requests), (66, 28));
+        assert_eq!(focused.keys[0].returned_route_errors, 25);
+        assert_eq!(focused.keys[0].routes[0].error_rate, 50.0);
+        assert_eq!(focused.keys[0].routes[0].error_share, 25.0);
+
+        let success_filter = CommonFilter {
+            api_key: Some("success".into()),
+            ..unfiltered.clone()
+        };
+        let (success, old_success) = load(
+            api_key_analysis_query(&window, &success_filter)
+                .build_query_as::<ApiKeyAnalysisRow>()
+                .fetch_all(&mut connection)
+                .await?,
+        );
+        assert_eq!(
+            (
+                success.total_keys,
+                success.total_requests,
+                success.failing_keys
+            ),
+            (1, 4, 0)
+        );
+        assert_eq!(success.error_requests, 0);
+        assert!(success.keys.is_empty());
+        assert!(old_success.is_empty());
+
+        for index in 0..24 {
+            sqlx::query("INSERT INTO api_audit_log (api_key) VALUES (?)")
+                .bind(format!("key-{index:02}"))
+                .execute(&mut connection)
+                .await?;
+        }
+        let (limited, count_ranked) = load(
+            api_key_analysis_query(&window, &unfiltered)
+                .build_query_as::<ApiKeyAnalysisRow>()
+                .fetch_all(&mut connection)
+                .await?,
+        );
+        assert_eq!(
+            (
+                limited.total_keys,
+                limited.failing_keys,
+                limited.returned_keys
+            ),
+            (29, 28, 20)
+        );
+        assert_eq!((limited.total_requests, limited.error_requests), (103, 61));
+        assert!(limited.keys.iter().all(|key| key.error_rate == 100.0));
+        assert_eq!(limited.keys.last().unwrap().api_key, "key-16");
+        assert_eq!(limited.keys[0].error_share, 3.0 / 61.0 * 100.0);
+        assert_eq!(count_ranked.len(), 8);
+        assert_eq!(count_ranked[0].label, "focus");
+        assert_eq!(count_ranked[0].error_requests, 32);
+        Ok(())
+    }
+
+    #[test]
+    fn api_key_analysis_uses_one_scan_and_limits_only_after_full_window_totals() {
+        let window = test_window();
+        let filter = test_filter();
+        let qb = api_key_analysis_query(&window, &filter);
+        let sql = qb.sql();
+        assert_eq!(sql.matches("FROM api_audit_log").count(), 1);
+        assert_eq!(sql.matches("GROUP BY").count(), 1);
+        assert!(sql.contains("GROUP BY BINARY api_key, BINARY path"));
+        assert!(sql.contains("SUM(route_rank = 1) OVER ()"));
+        assert!(sql.find("AS total_requests").unwrap() < sql.find("WHERE (key_rank").unwrap());
+        assert!(sql.contains("AND BINARY api_key = BINARY ?"));
+        assert!(!sql.contains("status_code >= 400"));
+        assert!(!sql.contains("request_body"));
+        assert!(!sql.contains("response_body"));
+        assert_eq!(
+            normalize_api_key(Some(" Key ".into())),
+            Some(" Key ".into())
+        );
+        assert_eq!(normalize_api_key(Some("\t \n".into())), None);
     }
 
     #[tokio::test]

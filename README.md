@@ -10,6 +10,7 @@ Web 分析页统一把 `status_code = 200` 视为成功，把 `status_code != 20
 - 可切换失败数量 / 失败率的交互 SVG 趋势图，支持键盘逐小时查看与精确数据表
 - 学术统计风格的接口散点图、接口失败 Pareto 图、Method 成功／失败构成图，标明坐标单位、统计分母与返回数据范围
 - 完整窗口内的高频失败模式、覆盖率及代表请求；支持次数、服务端失败、最大耗时排序
+- API Key 错误率排名及各 Key 的失败路由分布，页面显示完整 Key，可直接复制和筛选
 - 一键导出 Markdown 汇总报告，包含分析窗口、筛选条件、结论及样本标识
 - 高级筛选、其他维度及原始明细折叠展示，明细展开后才请求数据
 - Rust WebAssembly 分析模块，加载失败时自动使用相同算法的 JavaScript 实现
@@ -80,6 +81,14 @@ docker compose -f docker-compose.yml -f docker-compose.redis.yml up -d --build l
 
 点击“查看代表请求”会打开完整审计详情，优先显示响应体。报告导出不包含请求/响应正文，筛选条件中的 API Key 使用掩码。
 
+### API Key 失败分析
+
+`api_key_analysis` 使用完整筛选窗口，排除 `NULL` 和纯空白 Key，按原始字节区分 Key 与路由的大小写，不去掉非空 Key 的首尾空白。错误率为该 Key 的非 200 请求数 / 该 Key 的全部请求数；按错误率、失败数、总请求数降序，再按 Key 稳定排序，返回前 20 个有失败的 Key，不设最小样本量。页面同时显示分子、分母，避免把少量请求的 100% 与大量失败混为一谈。
+
+每个 Key 的路由合并不同 HTTP 方法，按失败数、总请求数降序及路径排序取前 5 个失败路由。路由错误率以该 Key 该路由的总请求为分母，失败占比以该 Key 的全部失败为分母；`affected_routes` 包含未展示的失败路由，`returned_route_errors` 仅累计已展示路由。全局 Key 数、请求数及失败数也包含 Top 20 之外的 Key。零失败窗口仍返回这些全局总量。
+
+新查询替换原 API Key 查询，只扫描一次现有报表覆盖索引所含字段，并在限制排名前用窗口函数计算各级分母；兼容字段 `top_error_api_keys` 仍返回失败次数最多的 8 个 Key。查询与分母来自同一 SQL 快照。Redis 报告缓存版本已更新，旧报告不会缺少该字段。页面、复制和详情显示明文 Key；导出的 Markdown 报告只保留 Key 前后各 4 位，短 Key 完全隐藏。
+
 ## WebAssembly 开发与验证
 
 `static/analytics.wasm` 已随源码提供，现有静态资源部署和 Docker 镜像会直接包含它。修改 Rust 分析算法后重新构建：
@@ -96,6 +105,8 @@ cargo test
 浏览器回归测试使用本地模拟数据，无需数据库；安装 `playwright` 并准备 Chrome 后运行 `node scripts/test-report.mjs`。可通过 `PLAYWRIGHT_MODULE` 指定模块位置，通过 `CHROME_EXECUTABLE` 指定浏览器。
 
 数据库集成测试默认跳过；准备独立临时数据库并设置 `LOGARK_TEST_DATABASE_URL` 后，运行 `cargo test failure_patterns_execute_against_full_window_fixture -- --ignored`。该测试使用临时表，覆盖完整窗口、分组归一化、大小写差异和样本覆盖率。
+
+API Key 的隔离数据库测试为 `cargo test api_key_analysis_preserves_full_denominators_and_exact_identities -- --ignored`，使用会话临时表，验证大小写与尾空格身份、HTML 字符串、空白 Key、全部筛选、零失败、Top 20 / Top 5 截断及完整分母。已在 MariaDB 11.4.13、`ONLY_FULL_GROUP_BY` 模式验证；测试不连接线上数据库。
 
 算法、回退行为和 ABI 见 [analytics-wasm/README.md](analytics-wasm/README.md)。计算在浏览器本地执行，WASM 与 JavaScript 使用一致的数值规则。
 

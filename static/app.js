@@ -23,6 +23,7 @@ const state = {
   recordsLoading: false,
   chartMode: "volume",
   detailPattern: null,
+  selectedApiKey: null,
 };
 
 const el = (id) => document.getElementById(id);
@@ -61,7 +62,7 @@ function buildDashboardParams() {
     path: el("path").value.trim(),
     method: el("method").value.trim().toUpperCase(),
     task_type: el("taskType").value.trim(),
-    api_key: el("apiKey").value.trim(),
+    api_key: el("apiKey").value.trim() ? el("apiKey").value : "",
   };
 }
 
@@ -167,12 +168,6 @@ function clampRate(value) {
   return Math.min(Math.max(rate, 0), 100);
 }
 
-function maskApiKey(value) {
-  const key = String(value || "");
-  if (!key) return "—";
-  if (key.length <= 8) return "••••••••";
-  return `${key.slice(0, 4)}••••${key.slice(-4)}`;
-}
 
 function statusBadgeClass(code) {
   if (code === 200) return "text-bg-success";
@@ -650,12 +645,18 @@ function reportConclusion(payload) {
   return t("patterns.conclusion", {count:Math.min(3,groups.length),share:rateFormat(concentration.top_three_share_pct),method:groups[0].method,path:groups[0].path,status:groups[0].status_code,code:groups[0].error_code || t("patterns.noCode")});
 }
 
+function maskExportApiKey(value) {
+  const key = String(value ?? "");
+  if (!key) return "—";
+  return key.length <= 8 ? "••••••••" : `${key.slice(0, 4)}••••${key.slice(-4)}`;
+}
+
 function exportReport() {
   const payload = state.dashboardPayload;
   if (!payload) return;
   const md = value => String(value ?? "").replace(/[\\`*_[\]<>#|]/g,"\\$&").replace(/[\r\n]+/g," ");
   const params = state.appliedDashboardParams || {};
-  const filters = Object.entries(params).filter(([,value])=>value!=="").map(([key,value])=>`${key}: ${key==="api_key"?maskApiKey(value):value}`).join(" · ");
+  const filters = Object.entries(params).filter(([,value])=>value!=="").map(([key,value])=>`${key}: ${key === "api_key" ? maskExportApiKey(value) : value}`).join(" · ");
   const lines = [`# TraceNote · ${t("reportView.title")}`,"",`${timeFormat(payload.window.from_ts)} — ${timeFormat(payload.window.to_ts)}`,md(filters),"",`> ${t("patterns.rule")}`,"",`## ${t("report.title")}`,"",md(reportConclusion(payload)),"",
     `- ${t("metrics.auditTotal")}: ${numberFormat(payload.summary.total_requests)}`,
     `- ${t("metrics.non200Count")}: ${numberFormat(payload.summary.error_requests)}`,
@@ -664,6 +665,26 @@ function exportReport() {
     `## ${t("reportView.failuresTitle")}`,"", md(el("failureCoverage").textContent.trim()),"",t("patterns.sampleStrategy"),""];
   for (const pattern of rankedPatterns(payload)) {
     lines.push(`### ${md(failureSignature(pattern))}`,"",`${t("patterns.occurrences")}: ${numberFormat(pattern.count)} · ${t("patterns.failureShare")}: ${rateFormat(pattern.impact_share_pct)} · ${t("patterns.maxLatency")}: ${durationFormat(pattern.max_duration_ms)}`,md(`request_id: ${pattern.representative?.request_id || "—"} · ID: ${pattern.representative?.id || "—"}`),`${timeFormat(pattern.first_seen_ts)} — ${timeFormat(pattern.last_seen_ts)}`,"");
+  }
+  const analysis = payload.api_key_analysis;
+  if (analysis && Array.isArray(analysis.keys)) {
+    lines.push(`## ${t("keyAnalysis.title")}`, "", md(t("keyAnalysis.rankingHelp")), "",
+      `${t("keyAnalysis.failingKeys")}: ${analysis.failing_keys} / ${analysis.total_keys}`,
+      `${t("keyAnalysis.keyErrors")}: ${numberFormat(analysis.error_requests)}`,
+      `${t("keyAnalysis.keyRequests")}: ${numberFormat(analysis.total_requests)}`, "");
+    for (const key of analysis.keys) {
+      lines.push(`### ${md(maskExportApiKey(key.api_key))}`, "", `${t("keyAnalysis.keyRate")}: ${rateFormat(key.error_rate, 2)}`,
+        md(t("keyAnalysis.counts", { errors: numberFormat(key.error_requests), total: numberFormat(key.total_requests) })),
+        `${t("keyAnalysis.errorShare")}: ${rateFormat(key.error_share, 2)}`,
+        ...(key.total_requests < 20 ? [t("keyAnalysis.smallSample")] : []), "");
+      for (const route of key.routes) {
+        lines.push(`- ${md(route.path || t("keyAnalysis.emptyPath"))}: ${md(t("keyAnalysis.counts", { errors: numberFormat(route.error_requests), total: numberFormat(route.total_requests) }))} · ${md(t("keyAnalysis.routeRate", { rate: rateFormat(route.error_rate, 2) }))} · ${rateFormat(route.error_share, 1)}`);
+      }
+      lines.push("", md(t("keyAnalysis.coverage", { shown: key.routes.length, total: key.affected_routes,
+        errors: numberFormat(key.returned_route_errors), all: numberFormat(key.error_requests),
+        share: rateFormat(key.error_requests ? key.returned_route_errors / key.error_requests * 100 : 0, 1) })), "");
+    }
+    lines.push(md(t("keyAnalysis.routeMeasure")), "", md(t("keyAnalysis.methodology")), "");
   }
   const url=URL.createObjectURL(new Blob([lines.join("\n")],{type:"text/markdown;charset=utf-8"}));
   const anchor=document.createElement("a"); anchor.href=url; anchor.download=`tracenote-report-${new Date(payload.window.to_ts).toISOString().slice(0,10)}.md`;
@@ -838,7 +859,58 @@ function renderTopErrorPaths(items) {
     .join("");
 }
 
-function renderDimensionList(targetId, items, { mask = false } = {}) {
+function renderApiKeyAnalysis(payload) {
+  const analysis = payload.api_key_analysis;
+  const keys = analysis?.keys;
+  if (!analysis || !Array.isArray(keys)) {
+    el("apiKeySummary").innerHTML = "";
+    el("apiKeyCount").textContent = "";
+    el("apiKeyRanking").innerHTML = emptyState(t("keyAnalysis.unavailable"));
+    el("apiKeyRoutes").innerHTML = emptyState(t("keyAnalysis.unavailable"));
+    return;
+  }
+  el("apiKeySummary").innerHTML = [
+    [t("keyAnalysis.failingKeys"), `${numberFormat(analysis.failing_keys)} / ${numberFormat(analysis.total_keys)}`],
+    [t("keyAnalysis.keyErrors"), numberFormat(analysis.error_requests)],
+    [t("keyAnalysis.keyRequests"), numberFormat(analysis.total_requests)],
+  ].map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
+  el("apiKeyCount").textContent = t("keyAnalysis.count", { shown: keys.length, total: numberFormat(analysis.failing_keys) });
+  if (!keys.length) {
+    state.selectedApiKey = null;
+    const message = t(analysis.total_keys ? "keyAnalysis.noFailures" : "keyAnalysis.noKeys");
+    el("apiKeyRanking").innerHTML = emptyState(message);
+    el("apiKeyRoutes").innerHTML = emptyState(message);
+    return;
+  }
+  if (!keys.some(key => key.api_key === state.selectedApiKey)) state.selectedApiKey = keys[0].api_key;
+  el("apiKeyRanking").innerHTML = keys.map((key, index) => {
+    const selected = key.api_key === state.selectedApiKey;
+    return `<button type="button" class="key-ranking-row${selected ? " is-selected" : ""}" data-key-index="${index}" aria-pressed="${selected}" aria-controls="apiKeyRoutes">
+      <span class="key-rank" aria-hidden="true">${String(index + 1).padStart(2, "0")}</span>
+      <span class="key-identity"><code class="key-value">${escapeHtml(key.api_key)}</code><span class="key-counts">${escapeHtml(t("keyAnalysis.counts", { errors: numberFormat(key.error_requests), total: numberFormat(key.total_requests) }))}</span>${key.total_requests < 20 ? `<span class="key-sample-note">${escapeHtml(t("keyAnalysis.smallSample"))}</span>` : ""}</span>
+      <span class="key-rate">${rateFormat(key.error_rate, 2)}<span class="key-rate-track" aria-hidden="true"><span style="width:${clampRate(key.error_rate)}%"></span></span></span>
+    </button>`;
+  }).join("");
+  renderApiKeyRoutes(keys.find(key => key.api_key === state.selectedApiKey));
+}
+
+function renderApiKeyRoutes(key) {
+  const routes = key.routes || [];
+  const covered = key.error_requests > 0 ? key.returned_route_errors / key.error_requests * 100 : 0;
+  el("apiKeyRoutes").innerHTML = `
+    <div class="key-selected-heading"><div><span class="key-selected-label">${escapeHtml(t("keyAnalysis.selected"))}</span><code id="selectedApiKey">${escapeHtml(key.api_key)}</code></div><button type="button" class="btn btn-sm btn-outline-secondary" data-copy-api-key>${escapeHtml(t("keyAnalysis.copy"))}</button></div>
+    <dl class="key-selected-stats"><div><dt>${escapeHtml(t("keyAnalysis.keyRate"))}</dt><dd>${rateFormat(key.error_rate, 2)}</dd></div><div><dt>${escapeHtml(t("keyAnalysis.errorShare"))}</dt><dd>${rateFormat(key.error_share, 2)}</dd></div><div><dt>${escapeHtml(t("keyAnalysis.affectedRoutes"))}</dt><dd>${numberFormat(key.affected_routes)}</dd></div></dl>
+    <p class="key-route-measure">${escapeHtml(t("keyAnalysis.routeMeasure"))}</p>
+    <div class="key-route-axis" aria-hidden="true"><span>0%</span><span>50%</span><span>100%</span></div>
+    <ol class="key-route-list">${routes.map((route, index) => `<li class="key-route-row${index === 0 ? " is-leading" : ""}">
+      <div class="key-route-heading"><code class="route-path">${escapeHtml(route.path || t("keyAnalysis.emptyPath"))}</code><strong class="route-share">${rateFormat(route.error_share, 1)}</strong></div>
+      <div class="key-route-track" aria-hidden="true"><span style="width:${clampRate(route.error_share)}%"></span></div>
+      <div class="key-route-evidence"><span>${escapeHtml(t("keyAnalysis.counts", { errors: numberFormat(route.error_requests), total: numberFormat(route.total_requests) }))}</span><span>${escapeHtml(t("keyAnalysis.routeRate", { rate: rateFormat(route.error_rate, 2) }))}</span></div>
+    </li>`).join("")}</ol>
+    <p id="apiKeyRouteCoverage" class="key-route-coverage">${escapeHtml(t("keyAnalysis.coverage", { shown: routes.length, total: numberFormat(key.affected_routes), errors: numberFormat(key.returned_route_errors), all: numberFormat(key.error_requests), share: rateFormat(covered, 1) }))}</p>`;
+}
+
+function renderDimensionList(targetId, items) {
   const host = el(targetId);
   if (!Array.isArray(items) || items.length === 0) {
     host.innerHTML = emptyState(t("empty.noNon200Data"));
@@ -847,7 +919,7 @@ function renderDimensionList(targetId, items, { mask = false } = {}) {
 
   host.innerHTML = items
     .map((item) => {
-      const displayLabel = mask ? maskApiKey(item.label) : item.label;
+      const displayLabel = item.label;
       return `
         <div class="list-group-item px-4 py-3 d-flex align-items-center justify-content-between gap-3">
           <div class="dimension-label" title="${escapeHtml(displayLabel)}">${escapeHtml(displayLabel)}</div>
@@ -973,7 +1045,7 @@ function renderDetail(record) {
     [t("fields.errorCode"), record.error_code || "—"],
     [t("columns.duration"), durationFormat(record.duration_ms)],
     [t("detail.clientIp"), record.client_ip || "—"],
-    ["API Key", maskApiKey(record.api_key)],
+    ["API Key", record.api_key || "—"],
     ["bid", record.bid || "—"],
     [t("detail.query"), record.query_string || "—"],
     [t("detail.bodySize"), `${numberFormat(record.request_body_size)} B → ${numberFormat(record.response_body_size)} B`],
@@ -1028,7 +1100,7 @@ function displayedScope() {
   if (params.path) parts.push(`${t("fields.pathPrefix")}: ${params.path}`);
   if (params.method) parts.push(`${t("fields.method")}: ${params.method}`);
   if (params.task_type) parts.push(`${t("fields.taskType")}: ${params.task_type}`);
-  if (params.api_key) parts.push(`${t("fields.apiKey")}: ${maskApiKey(params.api_key)}`);
+  if (params.api_key) parts.push(`${t("fields.apiKey")}: ${params.api_key}`);
   return parts.join(" · ");
 }
 
@@ -1064,6 +1136,8 @@ function renderInitialReportState(loading) {
   const spinner = loading ? '<span class="spinner-border spinner-border-sm" aria-hidden="true"></span>' : "";
   el("metricCards").innerHTML = `<div class="metrics-loading text-body-secondary">${spinner}<span>${message}</span></div>`;
   el("failurePatterns").innerHTML = `<div class="empty-state">${message}</div>`;
+  el("apiKeyRanking").innerHTML = `<div class="empty-state">${message}</div>`;
+  el("apiKeyRoutes").innerHTML = `<div class="empty-state">${message}</div>`;
 }
 
 async function loadDashboard(params, signal) {
@@ -1091,7 +1165,8 @@ function renderDashboardPayload(payload) {
   renderStatusDistribution(payload.error_status_distribution, Number(payload.summary.error_requests) || 0);
   renderMethodDistribution(payload.error_method_distribution, Number(payload.summary.error_requests) || 0);
   renderTopErrorPaths(payload.top_error_paths);
-  renderDimensionList("topErrorKeys", payload.top_error_api_keys, { mask: true });
+  renderDimensionList("topErrorKeys", payload.top_error_api_keys);
+  renderApiKeyAnalysis(payload);
   renderDimensionList("topErrorTasks", payload.top_error_task_types);
   renderLatestErrors(payload.latest_errors);
   renderFailurePatterns(payload);
@@ -1302,6 +1377,29 @@ el("localeSelect").addEventListener("change", (event) => {
 
 el("patternSort").addEventListener("change", () => {
   if (state.dashboardPayload) renderFailurePatterns(state.dashboardPayload);
+});
+el("apiKeyRanking").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-key-index]");
+  const key = state.dashboardPayload?.api_key_analysis?.keys[Number(button?.dataset.keyIndex)];
+  if (!button || !key) return;
+  state.selectedApiKey = key.api_key;
+  el("apiKeyRanking").querySelectorAll("[data-key-index]").forEach(item => {
+    const selected = item === button;
+    item.classList.toggle("is-selected", selected);
+    item.setAttribute("aria-pressed", String(selected));
+  });
+  renderApiKeyRoutes(key);
+});
+el("apiKeyRoutes").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-copy-api-key]");
+  if (!button || !state.selectedApiKey) return;
+  try {
+    await navigator.clipboard.writeText(state.selectedApiKey);
+    button.textContent = t("patterns.copied");
+    setTimeout(() => { if (button.isConnected) button.textContent = t("keyAnalysis.copy"); }, 1800);
+  } catch (_) {
+    showPageError(new Error(t("patterns.copyFailed")));
+  }
 });
 el("hours").addEventListener("change", refreshAll);
 el("reportExportButton").addEventListener("click", exportReport);

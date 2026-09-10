@@ -94,10 +94,48 @@ pub struct DashboardResponse {
     pub error_method_distribution: Vec<ErrorRateSlice>,
     pub top_error_paths: Vec<ErrorRateSlice>,
     pub top_error_api_keys: Vec<ErrorRateSlice>,
+    pub api_key_analysis: ApiKeyAnalysis,
     pub top_error_task_types: Vec<ErrorRateSlice>,
     pub failure_patterns: Vec<FailurePattern>,
     pub failure_pattern_coverage: FailurePatternCoverage,
     pub latest_errors: Vec<AuditRecordSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyAnalysis {
+    /// Full filtered window, excluding NULL and whitespace-only API keys.
+    pub total_keys: i64,
+    pub failing_keys: i64,
+    pub returned_keys: usize,
+    pub total_requests: i64,
+    pub error_requests: i64,
+    pub limit: usize,
+    pub route_limit: usize,
+    pub keys: Vec<ApiKeyFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyFailure {
+    /// Original case-sensitive value; displayed as supplied, without masking.
+    pub api_key: String,
+    pub total_requests: i64,
+    pub error_requests: i64,
+    pub error_rate: f64,
+    /// Percentage of failures belonging to all nonblank keys in the window.
+    pub error_share: f64,
+    pub affected_routes: i64,
+    pub routes: Vec<ApiKeyRoute>,
+    pub returned_route_errors: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyRoute {
+    pub path: String,
+    pub total_requests: i64,
+    pub error_requests: i64,
+    pub error_rate: f64,
+    /// Percentage of this key's failures, including routes outside the top five.
+    pub error_share: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

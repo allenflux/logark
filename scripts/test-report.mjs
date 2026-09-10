@@ -28,6 +28,25 @@ const patterns = summaries.map((representative, index) => ({
   avg_duration_ms: [240, 1420, 4800][index], max_duration_ms: representative.duration_ms, representative,
 }));
 const dimension = (label, total, errors) => ({ label, total_requests: total, error_requests: errors, error_rate: errors / total * 100 });
+const privateKey = "fixture-api-key-private-12345";
+const lowVolumeKey = "fixture-low-volume-key-100-percent-012345";
+const secondaryKey = "fixture-secondary-api-key-67890";
+const route = (path, total, errors, keyErrors) => ({ path, total_requests: total, error_requests: errors,
+  error_rate: errors / total * 100, error_share: errors / keyErrors * 100 });
+const apiKeyAnalysis = {
+  total_keys: 18, failing_keys: 3, returned_keys: 3, total_requests: 4800, error_requests: 400, limit: 20, route_limit: 5,
+  keys: [
+    { api_key: lowVolumeKey, total_requests: 4, error_requests: 4, error_rate: 100, error_share: 1,
+      affected_routes: 1, returned_route_errors: 4, routes: [route("/api/v1/low-volume", 4, 4, 4)] },
+    { api_key: privateKey, total_requests: 2000, error_requests: 220, error_rate: 11, error_share: 55,
+      affected_routes: 7, returned_route_errors: 198,
+      routes: [route("/api/v1/images/generate", 1000, 120, 220), route("/api/v1/jobs/dispatch", 400, 50, 220),
+        route("/api/v1/files/prepare", 300, 20, 220), route("/api/v1/uploads", 200, 6, 220), route("/api/v1/webhooks", 50, 2, 220)] },
+    { api_key: secondaryKey, total_requests: 2000, error_requests: 176, error_rate: 8.8, error_share: 44,
+      affected_routes: 2, returned_route_errors: 176,
+      routes: [route("/api/v1/images/generate", 1600, 160, 176), route("/api/v1/jobs/dispatch", 400, 16, 176)] },
+  ],
+};
 const fixture = {
   window: { from_ts: start, to_ts: end, bucket_ms: 3_600_000, hours: 24 },
   summary: { total_requests: 4800, successful_requests: 4400, error_requests: 400,
@@ -41,6 +60,7 @@ const fixture = {
   top_error_paths: patterns.map((pattern) => dimension(pattern.path, 800, pattern.count)),
   top_error_api_keys: [dimension("fixture-api-key-private-12345", 2000, 220)],
   top_error_task_types: [dimension("image", 3200, 360)],
+  api_key_analysis: apiKeyAnalysis,
   failure_patterns: patterns,
   failure_pattern_coverage: { aggregation_scope: "filtered_window", group_by: ["method", "path", "status_code", "error_code"],
     total_patterns: 18, returned_patterns: 3, returned_error_requests: 360, total_error_requests: 400,
@@ -65,6 +85,7 @@ function gateResponse(pathname, match = () => true) {
   return gate;
 }
 const injection = '/api/' + 'long-path-'.repeat(60) + '<img src=x onerror="window.__reportInjection=true">';
+const hostileKey = 'fixture-long-plaintext-key-'.repeat(12) + '\"><img src=x onerror="window.__apiKeyInjection=true">';
 function dashboard(url) {
   const payload = structuredClone(fixture);
   payload.window.hours = Number(url.searchParams.get("hours") || 24);
@@ -72,6 +93,26 @@ function dashboard(url) {
     payload.failure_patterns[0].path = injection;
     payload.failure_patterns[0].representative.path = injection;
     payload.top_error_paths[0].label = injection;
+    payload.api_key_analysis.keys[0].api_key = hostileKey;
+    payload.api_key_analysis.keys[0].routes[0].path = injection;
+    payload.top_error_api_keys[0].label = hostileKey;
+  }
+  if (scenario === "missingKeyAnalysis") delete payload.api_key_analysis;
+  if (scenario === "shortKey") {
+    payload.api_key_analysis.keys[0].api_key = "short123";
+    payload.top_error_api_keys[0].label = "short123";
+  }
+  if (scenario === "removedKey") {
+    payload.api_key_analysis.keys = [payload.api_key_analysis.keys[0], payload.api_key_analysis.keys[2]];
+    Object.assign(payload.api_key_analysis, { total_keys: 17, failing_keys: 2, returned_keys: 2, total_requests: 2800, error_requests: 180 });
+  }
+  if (scenario === "manyKeys") {
+    const keys = Array.from({ length: 20 }, (_, index) => ({ api_key: `fixture-ranked-api-key-${index + 1}`,
+      total_requests: 100, error_requests: 100 - index, error_rate: 100 - index,
+      error_share: (100 - index) / 1884 * 100, affected_routes: 1, returned_route_errors: 100 - index,
+      routes: [route(`/api/v1/ranked-route-${index + 1}`, 100, 100 - index, 100 - index)] }));
+    Object.assign(payload.api_key_analysis, { total_keys: 24, failing_keys: 24, returned_keys: 20,
+      total_requests: 2400, error_requests: 1884, keys });
   }
   if (scenario === "empty" || scenario === "success") {
     const total = scenario === "empty" ? 0 : 4800;
@@ -82,6 +123,8 @@ function dashboard(url) {
       "top_error_task_types", "failure_patterns", "latest_errors"]) payload[key] = [];
     Object.assign(payload.failure_pattern_coverage, { total_patterns: 0, returned_patterns: 0, returned_error_requests: 0,
       total_error_requests: 0, covered_error_rate: 0, truncated: false });
+    Object.assign(payload.api_key_analysis, { total_keys: total ? 18 : 0, failing_keys: 0, returned_keys: 0,
+      total_requests: total, error_requests: 0, keys: [] });
   }
   return payload;
 }
@@ -189,11 +232,40 @@ try {
   }
   assert.equal(await page.locator("#exportPreviewRange").textContent(), "最近 24 小时");
   assert.match(await page.locator("#exportPreviewStats").textContent(), /4,800/);
+  const keyButtons = page.locator("#apiKeyRanking button[data-key-index]");
+  assert.equal(await keyButtons.count(), 3);
+  assert.deepEqual(await keyButtons.locator(".key-value").allTextContents(), [lowVolumeKey, privateKey, secondaryKey],
+    "API keys remain readable in the server's error-rate order, including the small sample with 100% errors");
+  assert.match(await keyButtons.first().locator(".key-rate").textContent(), /100(?:\.0+)?%/);
+  assert.match(await keyButtons.nth(1).locator(".key-rate").textContent(), /11(?:\.0+)?%/);
+  assert.equal(await keyButtons.first().locator(".key-sample-note").count(), 1, "a key with only four requests needs a low-sample note");
+  assert.equal(await keyButtons.nth(1).locator(".key-sample-note").count(), 0, "large samples must not be labeled small");
+  const keySummary = await page.locator("#apiKeySummary").textContent();
+  for (const value of ["18", "3", "400"]) assert.ok(keySummary.includes(value), `API key summary should include ${value}`);
+  assert.equal(await page.locator("#selectedApiKey").textContent(), lowVolumeKey);
+  const requestsBeforeKeySelection = dashboardRequests().length;
+  const scopeBeforeKeySelection = await page.locator("#reportFreshness").textContent();
+  await keyButtons.nth(1).click();
+  assert.equal(await page.locator("#selectedApiKey").textContent(), privateKey);
+  assert.equal(await page.locator("#apiKeyRoutes .key-route-row").count(), 5);
+  assert.deepEqual(await page.locator("#apiKeyRoutes .route-path").allTextContents(), apiKeyAnalysis.keys[1].routes.map((item) => item.path));
+  assert.match(await page.locator("#apiKeyRoutes .route-share").first().textContent(), /54\.5\d*%/,
+    "each route share uses all 220 errors for the selected key, not just the 198 returned route errors");
+  assert.match(await page.locator("#apiKeyRouteCoverage").textContent(), /198\s*\/\s*220/);
+  assert.match(await page.locator("#apiKeyRouteCoverage").textContent(), /90(?:\.0+)?%/);
+  assert.equal(dashboardRequests().length, requestsBeforeKeySelection, "selecting an API key is local and must not recompute the dashboard");
+  assert.equal(await page.locator("#reportFreshness").textContent(), scopeBeforeKeySelection, "selecting an API key must not change the report scope");
+  assert.equal(await page.locator("#apiKey").inputValue(), "", "selection must not apply a hidden global key filter");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.locator("#apiKeyRoutes button[data-copy-api-key]").click();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), privateKey, "copy returns the complete selected API key");
+  assert.ok((await page.locator("#topErrorKeys").textContent()).includes(privateKey), "the existing API key ranking also uses plaintext keys");
   await noOverflow(page, "desktop report");
   await page.screenshot({ path: "/tmp/logark-report-desktop.png", fullPage: true });
   await page.screenshot({ path: "/tmp/logark-report-first-screen.png" });
   await page.locator("#statisticalViews").screenshot({ path: "/tmp/logark-report-statistics.png" });
   await page.locator(".report-footer").screenshot({ path: "/tmp/tracenote-footer.png" });
+  await page.locator("#apiKeyAnalysis").screenshot({ path: "/tmp/logark-api-key-desktop.png" });
 
   await page.selectOption("#patternSort", "severity");
   assert.deepEqual(await paths(page), [patterns[1].path, patterns[0].path, patterns[2].path]);
@@ -203,7 +275,7 @@ try {
   await page.locator("#responseBody").filter({ hasText: "Representative failure response" }).waitFor({ state: "visible" });
   assert.match(await page.locator("#responseBody").textContent(), /TIMEOUT/);
   assert.match(await page.locator("#detailPatternContext").textContent(), /40/);
-  assert.ok(!(await page.locator("#detailMeta").textContent()).includes("fixture-api-key-private-12345"), "detail API keys must be masked");
+  assert.ok((await page.locator("#detailMeta").textContent()).includes(privateKey), "detail API keys must be plaintext as requested");
   await page.locator("#detailModal [data-bs-dismiss=modal]").click();
   await page.locator("#detailModal").waitFor({ state: "hidden" });
   assert.equal(recordsRequests().length, 0, "representative detail must not fetch all records");
@@ -212,6 +284,9 @@ try {
   assert.equal(await page.locator("html").getAttribute("lang"), "en");
   assert.equal(await page.locator("#typicalFailuresTitle").textContent(), "Representative failures");
   assert.match(await page.locator("#patternCount").textContent(), /3 \/ 18 patterns/);
+  assert.equal(await page.locator("#selectedApiKey").textContent(), privateKey, "locale changes preserve the selected key");
+  assert.ok(!(await page.locator("#apiKeyAnalysis").textContent()).includes("apiKeys."), "API key translations should resolve after locale changes");
+  assert.equal(dashboardRequests().length, requestsBeforeKeySelection, "locale changes must not request another report");
   assert.ok(!(await page.locator("#statisticalViews").textContent()).includes("figures."), "figure translations should resolve after locale changes");
   for (const width of [768, 1024]) {
     await page.setViewportSize({ width, height: 1100 });
@@ -240,6 +315,7 @@ try {
   assert.equal(applied.get("method"), "POST");
   assert.equal(applied.get("task_type"), "image");
   assert.equal(applied.get("api_key"), "report-filter-secret-12345");
+  assert.equal(await page.locator("#selectedApiKey").textContent(), privateKey, "refresh preserves the selected key if it still exists");
   assert.equal(recordsRequests().length, 0, "refreshing a collapsed records list must remain lazy");
   await page.fill("#path", "/unapplied-draft");
   await page.locator("#recordsDisclosure > summary").click();
@@ -259,7 +335,15 @@ try {
   assert.match(exported, /fixture-request-1201/);
   assert.match(exported, /360 \/ 400/);
   assert.match(exported, /\/api\/v1\/scoped/);
-  assert.ok(!exported.includes("report-filter-secret-12345"), "export masks the applied API key");
+  for (const key of ["report-filter-secret-12345", privateKey, lowVolumeKey, secondaryKey]) {
+    assert.ok(!exported.includes(key), "downloaded reports must not include complete API keys");
+  }
+  assert.ok(exported.includes("api\\_key: repo••••2345"), "export masks the applied API key while retaining its first and last four characters");
+  assert.equal(exported.split("### fixt••••2345").length - 1, 2,
+    "export masks both returned keys with matching prefixes and suffixes without dropping either key's analysis");
+  assert.ok(exported.includes("### fixt••••7890"), "export includes the masked heading of every returned API key");
+  assert.match(exported, /198\s*\/\s*220/, "export includes the selected key's full route-error denominator");
+  assert.ok(exported.includes("/api/v1/webhooks"), "export includes per-key route details");
   assert.ok(!exported.includes("unapplied-draft"), "export uses the applied report scope");
 
   const previousMetrics = await page.locator("#metricCards").textContent();
@@ -271,7 +355,7 @@ try {
   assert.equal(await page.locator("#reportExportButton").isDisabled(), false, "the last complete report stays exportable while updating");
   assert.equal(await page.locator("#metricCards").textContent(), previousMetrics, "refreshing must retain readable report metrics");
   assert.match(await page.locator("#reportFreshness").textContent(), /\/api\/v1\/scoped/);
-  assert.ok(!(await page.locator("#reportFreshness").textContent()).includes("report-filter-secret-12345"), "displayed scope masks the API key");
+  assert.ok((await page.locator("#reportFreshness").textContent()).includes("report-filter-secret-12345"), "displayed scope includes the complete API key");
   await page.fill("#path", "/draft-during-request");
   assert.equal(await page.locator("#refreshButton").isDisabled(), false, "editing filters can supersede an in-flight request");
   await page.fill("#path", "/api/v1/new-scope");
@@ -287,6 +371,8 @@ try {
   assert.equal(recordsRequests().at(-1).searchParams.get("path"), "/api/v1/scoped", "records retain the completed scope while a new report is pending");
   const pendingExport = await exportedReport(page);
   assert.match(pendingExport, /\/api\/v1\/scoped/);
+  assert.ok(!pendingExport.includes("report-filter-secret-12345") && pendingExport.includes("repo••••2345"),
+    "exports of the previous report remain masked while a refresh is pending");
   assert.ok(!pendingExport.includes("/api/v1/new-scope"), "pending filters must not leak into the old report export");
   await page.locator("#reportOverview").scrollIntoViewIfNeeded();
   await page.screenshot({ path: "/tmp/tracenote-report-updating.png" });
@@ -348,6 +434,10 @@ try {
   assert.equal(await page.locator("#windowBadge").textContent(), "Last 7 days", "late superseded results cannot overwrite the most recent report");
   assert.match(await exportedReport(page), /hours: 168/);
   await page.evaluate(() => { window.fetch = window.__fixtureFetch; delete window.__fixtureFetch; });
+  scenario = "removedKey";
+  await page.click("#refreshButton");
+  await ready(page);
+  assert.equal(await page.locator("#selectedApiKey").textContent(), lowVolumeKey, "when a selected key disappears, select the first current result");
   await context.close();
 
   const initialReport = gateResponse("/api/dashboard");
@@ -375,6 +465,10 @@ try {
   await mobile.page.screenshot({ path: "/tmp/logark-report-mobile.png", fullPage: true });
   await mobile.page.screenshot({ path: "/tmp/logark-report-mobile-first-screen.png" });
   await mobile.page.locator("#statisticalViews").screenshot({ path: "/tmp/logark-report-mobile-statistics.png" });
+  await mobile.page.locator("#apiKeyRanking button[data-key-index]").nth(1).click();
+  assert.equal(await mobile.page.locator("#selectedApiKey").textContent(), privateKey);
+  await noOverflow(mobile.page, "mobile API key route analysis");
+  await mobile.page.locator("#apiKeyAnalysis").screenshot({ path: "/tmp/logark-api-key-mobile.png" });
   await mobile.page.locator("#advancedFilters > summary").click();
   await noOverflow(mobile.page, "mobile advanced filters");
   const filterBox = await mobile.page.locator(".advanced-filter-content").boundingBox();
@@ -393,11 +487,50 @@ try {
   assert.equal((await paths(hostile.page))[0], injection, "untrusted path must render as literal text");
   assert.equal(await hostile.page.locator("#failurePatterns img").count(), 0);
   assert.equal(await hostile.page.evaluate(() => window.__reportInjection), undefined);
+  assert.equal(await hostile.page.locator("#apiKeyRanking .key-value").first().textContent(), hostileKey,
+    "long untrusted API keys render in full as literal text");
+  assert.equal(await hostile.page.locator("#selectedApiKey").textContent(), hostileKey);
+  assert.equal(await hostile.page.locator("#apiKeyRoutes .route-path").first().textContent(), injection);
+  assert.equal(await hostile.page.locator("#apiKeyAnalysis img").count(), 0);
+  assert.equal(await hostile.page.evaluate(() => window.__apiKeyInjection), undefined);
+  const hostileExport = await exportedReport(hostile.page);
+  assert.ok(!hostileExport.includes("fixture-long-plaintext-key-"), "export masks a long untrusted API key before Markdown escaping");
   await noOverflow(hostile.page, "long hostile path in mobile report");
+  for (const selector of ["#apiKeyRanking .key-value", "#selectedApiKey", "#apiKeyRoutes .route-path"]) {
+    const size = await hostile.page.locator(selector).first().evaluate((node) => ({ visible: node.clientWidth, content: node.scrollWidth }));
+    assert.ok(size.content <= size.visible + 1, `${selector} should wrap long plaintext values rather than clip them`);
+  }
   assert.equal(await hostile.page.locator("#failureCoverage [role=meter]").getAttribute("aria-valuenow"), "90");
   await hostile.context.close();
 
-  for (const mode of ["empty", "success", "failure"]) {
+  const manyKeys = await openPage({ mode: "manyKeys" });
+  const fullRanking = manyKeys.page.locator("#apiKeyRanking button[data-key-index]");
+  assert.equal(await fullRanking.count(), 20, "the complete server-provided top 20 should remain accessible");
+  assert.match(await manyKeys.page.locator("#apiKeySummary").textContent(), /24/,
+    "top-20 rendering must preserve full-window key counts");
+  await fullRanking.last().click();
+  assert.equal(await manyKeys.page.locator("#selectedApiKey").textContent(), "fixture-ranked-api-key-20");
+  assert.match(await manyKeys.page.locator("#apiKeyRoutes .route-path").textContent(), /ranked-route-20/);
+  const manyKeysExport = await exportedReport(manyKeys.page);
+  assert.ok(manyKeysExport.includes("### fixt••••y-20"), "export includes the masked last key in the top 20");
+  assert.ok(!manyKeysExport.includes("fixture-ranked-api-key-"), "none of the top-20 keys should be exported in plaintext");
+  await noOverflow(manyKeys.page, "top-20 key ranking");
+  await manyKeys.context.close();
+
+  const shortKeyReport = await openPage({ mode: "shortKey" });
+  assert.equal(await shortKeyReport.page.locator("#selectedApiKey").textContent(), "short123", "short keys stay readable on the page");
+  await shortKeyReport.page.locator("#advancedFilters > summary").click();
+  await shortKeyReport.page.fill("#apiKey", "abc");
+  await shortKeyReport.page.click("#refreshButton");
+  await ready(shortKeyReport.page);
+  const shortKeyExport = await exportedReport(shortKeyReport.page);
+  assert.ok(shortKeyExport.includes("### ••••••••"), "keys of eight characters are fully masked in exported analysis headings");
+  assert.ok(shortKeyExport.includes("api\\_key: ••••••••"), "short API key filters are fully masked in exports");
+  assert.ok(!shortKeyExport.includes("short123") && !shortKeyExport.includes("api\\_key: abc"), "exports reveal no part of a short key");
+  assert.equal(await shortKeyReport.page.locator("#selectedApiKey").textContent(), "short123", "exporting does not mask the live page");
+  await shortKeyReport.context.close();
+
+  for (const mode of ["empty", "success", "failure", "missingKeyAnalysis"]) {
     const empty = await openPage({ mode });
     if (mode === "failure") {
       assert.equal(await empty.page.locator("#pageAlert").isVisible(), true);
@@ -406,10 +539,24 @@ try {
       assert.equal(await empty.page.locator("#metricCards .spinner-border").count(), 0, "an initial failure must not leave a loading spinner running");
       assert.match(await empty.page.locator("#metricCards").textContent(), /读取失败/);
       assert.equal(await empty.page.locator(".report-refresh-status").getAttribute("data-state"), "failed");
+    } else if (mode === "missingKeyAnalysis") {
+      assert.equal(await empty.page.locator("#apiKeyRanking button[data-key-index]").count(), 0);
+      const missingText = await empty.page.locator("#apiKeyAnalysis").textContent();
+      assert.match(missingText, /未提供|不支持|尚未|不可用|升级/,
+        "an old API without key analysis should show an explicit unavailable state");
+      assert.ok(!/0\s*%/.test(missingText), "missing key analytics must not pretend to be a measured zero error rate");
+      assert.equal(await empty.page.locator("#failurePatterns .failure-card").count(), 3, "a missing optional field must not break existing report sections");
     } else {
       assert.equal(await empty.page.locator("#failurePatterns .failure-card").count(), 0);
       assert.match(await empty.page.locator("#failurePatterns").textContent(), /没有非 200/);
       assert.ok(!/NaN|Infinity/.test(await empty.page.locator("main").textContent()));
+      assert.equal(await empty.page.locator("#apiKeyRanking button[data-key-index]").count(), 0);
+      assert.equal(await empty.page.locator("#apiKeyRoutes .key-route-row").count(), 0);
+      if (mode === "success") {
+        assert.match(await empty.page.locator("#apiKeyAnalysis").textContent(), /请求均返回 200/);
+        assert.match(await empty.page.locator("#apiKeySummary").textContent(), /18/,
+          "a successful window still reports the observed API key count");
+      }
       if (mode === "empty") assert.match(await empty.page.locator("#reportFindings").textContent(), /没有审计请求/);
     }
     await empty.context.close();
@@ -417,8 +564,11 @@ try {
   assert.deepEqual(browserErrors, [], "browser must have no uncaught application errors");
   assert.ok((await stat("/tmp/logark-report-desktop.png")).size > 1000);
   assert.ok((await stat("/tmp/logark-report-mobile.png")).size > 1000);
-  console.log("report browser checks passed (WASM/fallback, ranking, coverage, detail, locale, statistical figures and tables, chart keyboard control, applied filters, lazy records, pagination, Markdown export, delayed refresh and preserved scope, request deduplication/cancellation/late-response guard, nonblocking records, desktop/tablet/mobile overflow, hostile paths, empty/success/error states)");
+  assert.ok((await stat("/tmp/logark-api-key-desktop.png")).size > 1000);
+  assert.ok((await stat("/tmp/logark-api-key-mobile.png")).size > 1000);
+  console.log("report browser checks passed (WASM/fallback, ranking, coverage, detail, locale, statistical figures and tables, API key rate ranking/small samples/routes/plaintext page and copy/masked export/selection persistence, chart keyboard control, applied filters, lazy records, pagination, Markdown export, delayed refresh and preserved scope, request deduplication/cancellation/late-response guard, nonblocking records, desktop/tablet/mobile overflow, hostile paths and keys, empty/success/error/missing-field states)");
   console.log("Screenshots: /tmp/logark-report-desktop.png and /tmp/logark-report-mobile.png");
+  console.log("API key screenshots: /tmp/logark-api-key-desktop.png and /tmp/logark-api-key-mobile.png");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

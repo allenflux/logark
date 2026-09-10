@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use crate::{config::Config, model::DashboardResponse};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const MAX_ENVELOPE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -290,6 +290,8 @@ mod tests {
                 "unique_api_keys": 0, "unique_task_ids": 0, "affected_paths": 0},
             "error_timeline": [], "error_status_distribution": [], "error_method_distribution": [],
             "top_error_paths": [], "top_error_api_keys": [], "top_error_task_types": [],
+            "api_key_analysis": {"total_keys": 0, "failing_keys": 0, "returned_keys": 0,
+                "total_requests": 0, "error_requests": 0, "limit": 20, "route_limit": 5, "keys": []},
             "failure_patterns": [], "latest_errors": [],
             "failure_pattern_coverage": {"aggregation_scope": "full_filtered_window",
                 "group_by": ["method", "path", "status_code", "error_code"],

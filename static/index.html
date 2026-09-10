@@ -27,6 +27,7 @@
       <div class="report-nav">
         <a href="#reportOverview" class="active" aria-current="location" data-i18n="reportView.navReport">报告总览</a>
         <a href="#typicalFailures" data-i18n="reportView.navFailures">典型失败样本</a>
+        <a href="#apiKeyAnalysis" data-i18n="keyAnalysis.nav">API Key 分析</a>
         <a href="#requestDetails" data-i18n="reportView.navDetails">请求明细</a>
       </div>
       <div class="nav-utilities">
@@ -126,6 +127,7 @@
           <a href="#reportOverview" class="active" aria-current="location" data-i18n="reference.overview">汇总与结论</a>
           <a href="#reportTrends" data-i18n="reference.trend">失败趋势</a>
           <a href="#typicalFailures" data-i18n="reference.failures">典型失败样本</a>
+          <a href="#apiKeyAnalysis" data-i18n="keyAnalysis.nav">API Key 分析</a>
           <a href="#statisticalViews" data-i18n="reference.statistics">多维统计分析</a>
           <a href="#requestDetails" data-i18n="reference.details">请求明细</a>
         </nav>
@@ -185,6 +187,27 @@
       </div>
     </section>
 
+    <section id="apiKeyAnalysis" class="key-analysis-section" aria-labelledby="apiKeyAnalysisTitle">
+      <div class="section-kicker"><span class="section-number">03</span><span data-i18n="keyAnalysis.eyebrow">按凭证追踪失败</span></div>
+      <div class="scientific-section-heading">
+        <h2 id="apiKeyAnalysisTitle" data-i18n="keyAnalysis.title">API Key 错误率与路由分布</h2>
+        <p data-i18n="keyAnalysis.help">哪些 Key 更容易失败，失败又集中在哪里。选择一个 Key，查看它的主要失败路由。</p>
+      </div>
+      <dl id="apiKeySummary" class="key-summary" aria-live="polite"></dl>
+      <div class="key-analysis-grid">
+        <section class="key-ranking-panel" aria-labelledby="apiKeyRankingTitle">
+          <div class="key-panel-heading"><h3 id="apiKeyRankingTitle" data-i18n="keyAnalysis.ranking">错误率排行</h3><span id="apiKeyCount" class="key-count"></span></div>
+          <p class="key-panel-note" data-i18n="keyAnalysis.rankingHelp">错误率 = 该 Key 非 200 次数 / 该 Key 总请求数。相同错误率按失败次数排序。</p>
+          <div id="apiKeyRanking" class="key-ranking" aria-live="polite"><div class="empty-state" data-i18n="states.loading">正在加载</div></div>
+        </section>
+        <section class="key-routes-panel" aria-labelledby="apiKeyRoutesTitle">
+          <div class="key-panel-heading"><h3 id="apiKeyRoutesTitle" data-i18n="keyAnalysis.routes">失败集中路由</h3></div>
+          <div id="apiKeyRoutes" aria-live="polite"><div class="empty-state" data-i18n="states.loading">正在加载</div></div>
+        </section>
+      </div>
+      <p class="key-methodology" data-i18n="keyAnalysis.methodology">与整份报告使用相同周期和筛选。排除未携带 API Key 的请求；路由按路径汇总，合并 HTTP 方法。请求不足 20 条时标记小样本，不改变排行。</p>
+    </section>
+
     <section id="statisticalViews" class="scientific-section" aria-labelledby="statisticalTitle">
       <div class="scientific-section-heading"><h2 id="statisticalTitle" data-i18n="figures.sectionTitle">多维统计分析</h2><p data-i18n="figures.sectionHelp">按接口规模、失败集中度与 HTTP 方法比较当前窗口。</p></div>
       <div class="scientific-grid-layout">
@@ -195,7 +218,7 @@
     </section>
 
     <section id="requestDetails" class="supporting-section" aria-label="进一步分析">
-      <div class="section-kicker"><span class="section-number">03</span><span data-i18n="reportView.navDetails">请求明细</span></div>
+      <div class="section-kicker"><span class="section-number">04</span><span data-i18n="reportView.navDetails">请求明细</span></div>
       <details id="dimensionsDisclosure" class="report-disclosure">
         <summary>
           <span class="disclosure-icon"><i class="bi bi-bar-chart-line" aria-hidden="true"></i></span>
@@ -251,7 +274,7 @@
         </section></div>
             <div class="col-12 col-lg-4"><section class="report-panel " aria-labelledby="keysTitle">
           <div class="panel-heading px-4 py-3">
-            <h2 id="keysTitle" class="h5 mb-0" data-i18n="ranking.apiKeys">API Key 错误排行</h2>
+            <h2 id="keysTitle" class="h5 mb-0" data-i18n="ranking.apiKeys">API Key 失败次数排行</h2>
           </div>
           <div id="topErrorKeys" class="list-group list-group-flush"></div>
         </section></div>
@@ -373,7 +396,7 @@
 
     <section id="reportDownload" class="report-download" aria-labelledby="downloadTitle">
       <div class="report-document" aria-hidden="true"><div class="document-brand">Trace<span class="brand-accent">Note</span></div><div class="document-rule"></div><div class="document-title" data-i18n="reportView.title">请求质量报告</div><div id="exportPreviewRange" class="document-period">—</div><div id="exportPreviewStats" class="document-stats"></div><div class="document-lines"><span></span><span></span><span></span></div><div class="document-footer">api_audit_log</div></div>
-      <div class="download-copy"><h2 id="downloadTitle" data-i18n="reference.downloadTitle">保存本期报告</h2><p data-i18n="reference.downloadHelp">导出当前窗口的汇总、失败特征与样本标识。</p><button id="reportExportButton" type="button" class="btn btn-primary" disabled><i class="bi bi-download app-icon" aria-hidden="true"></i><span data-i18n="reportView.export">导出报告</span></button></div>
+      <div class="download-copy"><h2 id="downloadTitle" data-i18n="reference.downloadTitle">保存本期报告</h2><p data-i18n="reference.downloadHelp">导出当前窗口的汇总、API Key 路由分析与典型失败。导出文件中的 API Key 会脱敏。</p><button id="reportExportButton" type="button" class="btn btn-primary" disabled><i class="bi bi-download app-icon" aria-hidden="true"></i><span data-i18n="reportView.export">导出报告</span></button></div>
     </section>
     <div class="back-top"><a href="#reportOverview" data-i18n="reference.backTop">返回顶部</a></div>
     <footer class="report-footer"><span class="footer-brand">TraceNote</span><span data-i18n="reportView.footer">统计范围以当前筛选条件为准。</span><code>status_code != 200</code><small class="author-credit" data-i18n="brand.author">allen flux 制作</small></footer>
