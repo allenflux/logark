@@ -56,7 +56,7 @@ impl Config {
             max_window_hours: env_u32("LOGARK_MAX_WINDOW_HOURS", 168),
             max_list_limit: env_u32("LOGARK_MAX_LIST_LIMIT", 100),
             slow_request_ms: env_i32("LOGARK_SLOW_REQUEST_MS", 1000),
-            audit_retention_days: env_u32_in_range("LOGARK_AUDIT_RETENTION_DAYS", 14, 1, 3_650)?,
+            audit_retention_days: env_u32_in_range("LOGARK_AUDIT_RETENTION_DAYS", 8, 1, 3_650)?,
             audit_cleanup_interval_secs: env_u64_in_range(
                 "LOGARK_AUDIT_CLEANUP_INTERVAL_SECS",
                 3_600,

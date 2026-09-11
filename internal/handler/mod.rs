@@ -160,7 +160,7 @@ mod health_tests {
             max_window_hours: 168,
             max_list_limit: 100,
             slow_request_ms: 1000,
-            audit_retention_days: 14,
+            audit_retention_days: 8,
             audit_cleanup_interval_secs: 3600,
             audit_cleanup_batch_size: 1000,
             tg_bot_token: None,

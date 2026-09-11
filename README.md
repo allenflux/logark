@@ -23,7 +23,7 @@ Web 分析页统一把 `status_code = 200` 视为成功，把 `status_code != 20
 - `GET /api/records/uuid/:uuid` 按 `uuid` 查询详情
 - `GET /health` 健康检查
 - MySQL `api_audit_log` 表初始化
-- `api_audit_log` 滚动 14 天自动清理
+- `api_audit_log` 滚动 8 天自动清理
 - Telegram Bot：`bid` 监控、日报和排名
 
 ## 为什么这样设计
@@ -165,7 +165,7 @@ cargo run --bin logark-tg-bot
 - `LOGARK_MAX_WINDOW_HOURS` 最大分析窗口
 - `LOGARK_MAX_LIST_LIMIT` 单次最多返回多少条记录
 - `LOGARK_SLOW_REQUEST_MS` 慢请求阈值，便于后续扩展
-- `LOGARK_AUDIT_RETENTION_DAYS` 审计日志保留天数，默认 `14`
+- `LOGARK_AUDIT_RETENTION_DAYS` 审计日志保留天数，默认 `8`
 - `LOGARK_AUDIT_CLEANUP_INTERVAL_SECS` 自动清理间隔，默认 `3600` 秒
 - `LOGARK_AUDIT_CLEANUP_BATCH_SIZE` 每批删除行数，默认 `1000`，最大 `10000`
 - `TG_BOT_TOKEN` Telegram 机器人 token
@@ -208,7 +208,7 @@ curl 'http://127.0.0.1:7700/api/records?hours=24&non_200=true&limit=20'
 `logark-server` 成功绑定监听端口后会自动启动清理任务：启动时立即执行一次，之后默认每小时执行。每轮固定计算一次边界，删除满足以下条件的记录：
 
 ```sql
-request_ts < 当前 UTC 毫秒时间 - 14 × 24 小时
+request_ts < 当前 UTC 毫秒时间 - 8 × 24 小时
 ```
 
 清理只作用于 `api_audit_log`，不会删除保存 Telegram 监控配置的 `tg_bid_watch`。删除按 `request_ts` 从旧到新每批自动提交，批间暂停 50 ms；每组最多执行 100 批，仍有积压时暂停 30 秒后继续追赶。单次失败只记录日志，HTTP 服务不会退出，并会在下一个周期重试。
